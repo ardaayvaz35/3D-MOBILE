@@ -1,13 +1,18 @@
 {
   "expo": {
-    "name": "mobile",
-    "slug": "mobile",
+    "name": "3D Scanner",
+    "slug": "threed-scanner",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.threedscanner.app",
+      "infoPlist": {
+        "NSCameraUsageDescription": "3D tarama için kamera gerekiyor",
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -16,10 +21,27 @@
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "3D tarama için kamera gerekiyor"
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "15860338-0624-4231-90c8-0e72b6feccb5"
+      }
     }
   }
 }
