@@ -67,7 +67,7 @@ class CaptureManager {
         let duration = Date().timeIntervalSince(start)
 
         let exportURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("scan_\(UUID().uuidString.prefix(8)).tar.gz")
+            .appendingPathComponent("scan_\(UUID().uuidString.prefix(8)).zip")
 
         let exporter = FrameExporter()
         try exporter.export(frames: frames, to: exportURL)

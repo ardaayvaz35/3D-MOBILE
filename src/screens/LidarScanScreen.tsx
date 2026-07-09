@@ -79,7 +79,7 @@ export default function LidarScanScreen({ navigation }: Props) {
     try {
       const result = await stopLidarRecording();
       const uploadResult = await uploadCapture(
-        { uri: `file://${result.archivePath}`, name: 'scan.tar.gz', mimeType: 'application/gzip' },
+        { uri: `file://${result.archivePath}`, name: 'scan.zip', mimeType: 'application/zip' },
         'ios_lidar'
       );
       navigation.replace('Status', { captureId: uploadResult.capture_id });

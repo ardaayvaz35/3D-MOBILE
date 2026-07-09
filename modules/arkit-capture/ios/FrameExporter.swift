@@ -57,21 +57,31 @@ class FrameExporter {
         let jsonData = try JSONSerialization.data(withJSONObject: metadata, options: .prettyPrinted)
         try jsonData.write(to: metaJSON)
 
-        try createTarGz(from: workDir, to: url.path)
+        try createZip(from: workDir, to: url)
         try? FileManager.default.removeItem(at: workDir)
     }
 
-    private func createTarGz(from dir: URL, to archivePath: String) throws {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
-        task.arguments = ["-czf", archivePath, "-C", dir.path, "."]
-        try task.run()
-        task.waitUntilExit()
-        if task.terminationStatus != 0 {
-            throw NSError(domain: "FrameExporter", code: Int(task.terminationStatus), userInfo: [
-                NSLocalizedDescriptionKey: "tar exited with status \(task.terminationStatus)"
-            ])
+    /// Zip a directory on iOS. `Process`/`/usr/bin/tar` do NOT exist on iOS
+    /// (macOS-only), so we use NSFileCoordinator's `.forUploading` option,
+    /// which produces a .zip of the coordinated directory. The resulting zip
+    /// wraps the contents in a top-level folder (the workDir's name); the
+    /// backend's extraction resolves that single wrapper folder automatically.
+    private func createZip(from dir: URL, to dest: URL) throws {
+        let coordinator = NSFileCoordinator()
+        var coordError: NSError?
+        var innerError: Error?
+        coordinator.coordinate(readingItemAt: dir, options: [.forUploading], error: &coordError) { (zippedURL) in
+            do {
+                if FileManager.default.fileExists(atPath: dest.path) {
+                    try FileManager.default.removeItem(at: dest)
+                }
+                try FileManager.default.copyItem(at: zippedURL, to: dest)
+            } catch {
+                innerError = error
+            }
         }
+        if let e = coordError { throw e }
+        if let e = innerError { throw e }
     }
 
     private func deviceModel() -> String {
