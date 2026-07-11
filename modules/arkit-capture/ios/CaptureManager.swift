@@ -101,7 +101,7 @@ class CaptureManager {
 
         if let jpeg = CIContext().jpegRepresentation(
             of: rgbImage, colorSpace: rgbImage.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!,
-            options: [kCGImageDestinationLossyCompressionQuality: 0.85]
+            options: [CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): 0.85]
         ) {
             try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
             try? jpeg.write(to: URL(fileURLWithPath: rgbPath))
