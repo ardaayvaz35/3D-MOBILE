@@ -61,8 +61,8 @@ export default function LidarScanScreen({ navigation }: Props) {
     if (angleCoverage < MIN_ANGLE_COVERAGE) {
       Alert.alert(
         'Az açıdan tarandı',
-        `Objenin sadece ~${Math.round(angleCoverage * 100)}%'lik bir açısı tarandı. ` +
-          `Daha iyi sonuç için etrafında en az yarım tur (${Math.round(MIN_ANGLE_COVERAGE * 100)}%+) dönerek tekrar tara. Yine de yüklemek ister misin?`,
+        `Odanın sadece ~${Math.round(angleCoverage * 100)}%'lik bir kısmı tarandı. ` +
+          `Daha iyi sonuç için yerinde dönerek en az yarım tur (${Math.round(MIN_ANGLE_COVERAGE * 100)}%+) tara. Yine de yüklemek ister misin?`,
         [
           { text: 'İptal, devam et', style: 'cancel', onPress: () => setRecording(true) },
           { text: 'Yine de yükle', style: 'destructive', onPress: () => finishAndUpload() },
@@ -119,9 +119,9 @@ export default function LidarScanScreen({ navigation }: Props) {
             <Text style={styles.infoText}>
               {recording
                 ? coverageOk
-                  ? 'İyi gidiyor — devam et ya da durdur.'
-                  : 'Objenin/odanın etrafında yavaşça dön, farklı açılardan çek.'
-                : "Başlat'a basıp objenin/odanın etrafında yavaşça dolaş."}
+                  ? 'İyi gidiyor — köşeleri ve tavanı da tara, sonra durdur.'
+                  : 'Yavaşça dönerek odanın tüm duvarlarını, köşelerini ve zemini tara.'
+                : "Başlat'a bas, odanın ortasında durup yavaşça dönerek her yöne bak."}
             </Text>
 
             <Pressable

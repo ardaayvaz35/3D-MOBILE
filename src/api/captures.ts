@@ -54,23 +54,31 @@ export async function uploadCapture(
   // limit ("string length exceeds limit"), so we get a signed upload URL and
   // PUT the file with expo-file-system, which streams from disk without ever
   // materializing the whole file in JS memory.
+  const info = await FileSystem.getInfoAsync(archive.uri);
+  console.log('[upload] archive', archive.uri, 'exists:', info.exists, 'size:', (info as any).size);
+
+  console.log('[upload] requesting signed url for', storagePath);
   const { data: signed, error: signErr } = await supabase.storage
     .from(UPLOAD_BUCKET)
     .createSignedUploadUrl(storagePath);
   if (signErr || !signed?.signedUrl) {
+    console.log('[upload] signed url FAILED', signErr);
     throw new Error(`Yükleme URL'si alınamadı: ${signErr?.message ?? 'bilinmeyen hata'}`);
   }
+  console.log('[upload] got signed url, streaming file...');
 
   const uploadRes = await FileSystem.uploadAsync(signed.signedUrl, archive.uri, {
     httpMethod: 'PUT',
     uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
     headers: { 'Content-Type': archive.mimeType },
   });
+  console.log('[upload] upload HTTP status:', uploadRes.status);
   if (uploadRes.status < 200 || uploadRes.status >= 300) {
     throw new Error(
       `Yükleme başarısız (HTTP ${uploadRes.status}): ${uploadRes.body?.slice(0, 200) ?? ''}`
     );
   }
+  console.log('[upload] file uploaded, invoking submit-capture...');
 
   // Hand off to the Edge Function (credits + GPU trigger).
   const { data, error } = await supabase.functions.invoke('submit-capture', {
@@ -80,8 +88,10 @@ export async function uploadCapture(
     // Surface the function's structured error (e.g. insufficient_credits).
     const ctx = (error as any).context;
     const detail = ctx?.error ?? error.message;
+    console.log('[upload] submit-capture FAILED', detail, error);
     throw new Error(`İşleme başlatılamadı: ${detail}`);
   }
+  console.log('[upload] submit-capture OK, capture_id:', data?.capture_id);
 
   return { capture_id: data.capture_id, status: data.status ?? 'uploaded', message: 'Yüklendi' };
 }
