@@ -92,8 +92,11 @@ class CaptureManager {
     private func handle(frame: ARFrame) {
         guard isRecording else { return }
 
-        guard let depthMap = frame.sceneDepth?.depthMap,
-              let confidenceMap = frame.sceneDepth?.confidenceMap else {
+        // Require an active LiDAR depth frame (ensures good tracking), but we no
+        // longer persist the depth/confidence buffers: the server reconstructs
+        // via COLMAP from the RGB frames only, and the raw depth maps roughly
+        // doubled the archive size (pushing scans over the upload limit).
+        guard frame.sceneDepth != nil else {
             return
         }
 
@@ -115,19 +118,11 @@ class CaptureManager {
 
         if let jpeg = CIContext().jpegRepresentation(
             of: rgbImage, colorSpace: rgbImage.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!,
-            options: [CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): 0.85]
+            options: [CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): 0.6]
         ) {
             try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
             try? jpeg.write(to: URL(fileURLWithPath: rgbPath))
         }
-
-        let depthName = "frame_\(String(format: "%06d", index))_depth.png"
-        let depthPath = tempDir.appendingPathComponent(depthName).path
-        saveDepth16(depthMap, to: depthPath)
-
-        let confName = "frame_\(String(format: "%06d", index))_conf.png"
-        let confPath = tempDir.appendingPathComponent(confName).path
-        saveConfidence(confidenceMap, to: confPath)
 
         let transform = frame.camera.transform
         let intrinsics = frame.camera.intrinsics
@@ -136,8 +131,8 @@ class CaptureManager {
             index: index,
             timestamp: timestamp,
             rgbPath: rgbPath,
-            depthPath: depthPath,
-            confidencePath: confPath,
+            depthPath: "",
+            confidencePath: "",
             intrinsics: intrinsics,
             transform: transform
         ))

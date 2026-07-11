@@ -17,21 +17,31 @@ class FrameExporter {
             let rgbDest = workDir.appendingPathComponent(rgbFile.lastPathComponent)
             try? FileManager.default.copyItem(atPath: frame.rgbPath, toPath: rgbDest.path)
 
-            let depthFile = URL(fileURLWithPath: frame.depthPath)
-            let depthDest = workDir.appendingPathComponent(depthFile.lastPathComponent)
-            try? FileManager.default.copyItem(atPath: frame.depthPath, toPath: depthDest.path)
+            // Depth/confidence are no longer persisted (COLMAP path uses RGB
+            // only); copy + reference them only if present.
+            var depthName = ""
+            if !frame.depthPath.isEmpty {
+                let depthFile = URL(fileURLWithPath: frame.depthPath)
+                depthName = depthFile.lastPathComponent
+                try? FileManager.default.copyItem(atPath: frame.depthPath,
+                                                  toPath: workDir.appendingPathComponent(depthName).path)
+            }
 
-            let confFile = URL(fileURLWithPath: frame.confidencePath)
-            let confDest = workDir.appendingPathComponent(confFile.lastPathComponent)
-            try? FileManager.default.copyItem(atPath: frame.confidencePath, toPath: confDest.path)
+            var confName = ""
+            if !frame.confidencePath.isEmpty {
+                let confFile = URL(fileURLWithPath: frame.confidencePath)
+                confName = confFile.lastPathComponent
+                try? FileManager.default.copyItem(atPath: frame.confidencePath,
+                                                  toPath: workDir.appendingPathComponent(confName).path)
+            }
 
             let intrinsics = frame.intrinsics
             frameMetas.append([
                 "frame_id": frame.index,
                 "timestamp_ns": Int(frame.timestamp * 1_000_000_000),
                 "image_path": rgbFile.lastPathComponent,
-                "depth_path": depthFile.lastPathComponent,
-                "confidence_path": confFile.lastPathComponent,
+                "depth_path": depthName,
+                "confidence_path": confName,
                 "camera_intrinsics": [
                     intrinsics[0, 0], intrinsics[1, 1],
                     intrinsics[2, 0], intrinsics[2, 1],

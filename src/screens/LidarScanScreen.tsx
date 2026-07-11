@@ -119,9 +119,9 @@ export default function LidarScanScreen({ navigation }: Props) {
             <Text style={styles.infoText}>
               {recording
                 ? coverageOk
-                  ? 'İyi gidiyor — köşeleri ve tavanı da tara, sonra durdur.'
-                  : 'Yavaşça dönerek odanın tüm duvarlarını, köşelerini ve zemini tara.'
-                : "Başlat'a bas, odanın ortasında durup yavaşça dönerek her yöne bak."}
+                  ? 'İyi gidiyor — yürümeye devam et, köşeleri farklı noktalardan çek.'
+                  : 'Oda içinde YÜRÜYEREK tara — sabit durma, yer değiştirerek duvarlara farklı açılardan bak.'
+                : "Başlat'a bas ve oda içinde yürüyerek tara. Sabit durup dönme — konumunu değiştir (COLMAP hareket ister)."}
             </Text>
 
             <Pressable
