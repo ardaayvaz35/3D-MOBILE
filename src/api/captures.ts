@@ -9,6 +9,7 @@
 //   3. Read status + list directly from the `captures` table via RLS, and mint
 //      signed URLs for our own splats client-side.
 
+import * as FileSystem from 'expo-file-system/legacy';
 import { CaptureDetail, CaptureStatusValue, ClientType, UploadResponse } from '../types/capture';
 import { supabase } from '../lib/supabase';
 
@@ -48,12 +49,28 @@ export async function uploadCapture(
   const folder = `${userId}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const storagePath = `${folder}/frames${ext}`;
 
-  // Read the local file into an ArrayBuffer and upload it.
-  const arraybuffer = await fetch(archive.uri).then((r) => r.arrayBuffer());
-  const { error: upErr } = await supabase.storage
+  // Stream the archive straight from disk to Storage. Reading a large scan
+  // zip into a JS string/ArrayBuffer blows past the engine's string-length
+  // limit ("string length exceeds limit"), so we get a signed upload URL and
+  // PUT the file with expo-file-system, which streams from disk without ever
+  // materializing the whole file in JS memory.
+  const { data: signed, error: signErr } = await supabase.storage
     .from(UPLOAD_BUCKET)
-    .upload(storagePath, arraybuffer, { contentType: archive.mimeType, upsert: false });
-  if (upErr) throw new Error(`Yükleme başarısız: ${upErr.message}`);
+    .createSignedUploadUrl(storagePath);
+  if (signErr || !signed?.signedUrl) {
+    throw new Error(`Yükleme URL'si alınamadı: ${signErr?.message ?? 'bilinmeyen hata'}`);
+  }
+
+  const uploadRes = await FileSystem.uploadAsync(signed.signedUrl, archive.uri, {
+    httpMethod: 'PUT',
+    uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
+    headers: { 'Content-Type': archive.mimeType },
+  });
+  if (uploadRes.status < 200 || uploadRes.status >= 300) {
+    throw new Error(
+      `Yükleme başarısız (HTTP ${uploadRes.status}): ${uploadRes.body?.slice(0, 200) ?? ''}`
+    );
+  }
 
   // Hand off to the Edge Function (credits + GPU trigger).
   const { data, error } = await supabase.functions.invoke('submit-capture', {
