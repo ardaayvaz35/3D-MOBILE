@@ -37,6 +37,11 @@ class CaptureManager {
     }
 
     private static let angleSectorCount = 12
+    // Cap the capture rate: ARKit delivers ~60 fps, but photogrammetry only
+    // needs a few well-spaced frames per second. Saving every frame produced
+    // ~360 MB scans. ~3 fps keeps a 30 s room scan around 20-30 MB.
+    private static let minFrameInterval: TimeInterval = 0.33
+    private var lastCaptureTime: TimeInterval = 0
 
     private let onFrame: (Int, Double) -> Void  // (frameCount, angleCoveragePct 0..1)
     private(set) var isRecording = false
@@ -52,6 +57,7 @@ class CaptureManager {
     func startRecording() {
         frames.removeAll()
         frameCount = 0
+        lastCaptureTime = 0
         visitedSectors.removeAll()
         isRecording = true
         recordingStart = Date()
@@ -90,6 +96,14 @@ class CaptureManager {
               let confidenceMap = frame.sceneDepth?.confidenceMap else {
             return
         }
+
+        // Throttle to ~3 fps. Angle-coverage tracking still updates below so the
+        // UI progress stays responsive even for skipped frames.
+        if frame.timestamp - lastCaptureTime < Self.minFrameInterval {
+            registerAngleCoverage(transform: frame.camera.transform)
+            return
+        }
+        lastCaptureTime = frame.timestamp
 
         let timestamp = frame.timestamp
         let index = frameCount
