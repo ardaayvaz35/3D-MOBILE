@@ -1,0 +1,7 @@
+{
+  "name": "arkit-capture",
+  "version": "1.0.0",
+  "description": "ARKit LiDAR capture (RGB+Depth+Pose) for 3D scanning",
+  "main": "index.ts",
+  "private": true
+}
