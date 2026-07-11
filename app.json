@@ -36,7 +36,8 @@
         {
           "cameraPermission": "3D tarama için kamera gerekiyor"
         }
-      ]
+      ],
+      "./plugins/withArkitLocalModule"
     ],
     "extra": {
       "eas": {
