@@ -1,6 +1,9 @@
 {
-  "platforms": ["apple"],
+  "platforms": ["apple", "ios"],
   "apple": {
+    "modules": ["ArkitCaptureModule"]
+  },
+  "ios": {
     "modules": ["ArkitCaptureModule"]
   }
 }
