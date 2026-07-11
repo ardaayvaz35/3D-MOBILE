@@ -32,6 +32,14 @@ final class ArkitSessionHost: NSObject, ARSessionDelegate {
         isRunning = false
     }
 
+    /// All LiDAR-reconstructed mesh anchors currently tracked by the session.
+    /// This is the same geometry drawn as the on-screen blue overlay -- ARKit
+    /// has already fused every depth frame into these meshes, so exporting them
+    /// gives us a clean world-space point cloud with no COLMAP/parallax needed.
+    func currentMeshAnchors() -> [ARMeshAnchor] {
+        return (session.currentFrame?.anchors ?? []).compactMap { $0 as? ARMeshAnchor }
+    }
+
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
         onFrame?(frame)
     }

@@ -5,10 +5,21 @@ import simd
 /// that matches the 3D scanner backend's expected schema (client_type: ios_lidar).
 class FrameExporter {
 
-    func export(frames: [CaptureManager.FrameData], to url: URL) throws {
+    func export(frames: [CaptureManager.FrameData],
+                meshVertices: [simd_float3] = [],
+                to url: URL) throws {
         let workDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("export_\(UUID().uuidString.prefix(8))")
         try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
+
+        // Write the fused LiDAR mesh as a binary PLY point cloud (the splat
+        // init seed). Empty string in metadata if the scan produced no mesh.
+        var meshName = ""
+        if !meshVertices.isEmpty {
+            meshName = "mesh.ply"
+            try writeBinaryPLY(vertices: meshVertices,
+                               to: workDir.appendingPathComponent(meshName))
+        }
 
         var frameMetas: [[String: Any]] = []
 
@@ -55,10 +66,12 @@ class FrameExporter {
         let metadata: [String: Any] = [
             "frames": frameMetas,
             "client_type": "ios_lidar",
+            "mesh_path": meshName,
             "metadata": [
                 "device_model": deviceModel(),
                 "has_lidar": true,
                 "total_frames": frames.count,
+                "mesh_vertex_count": meshVertices.count,
                 "duration_seconds": round((frames.last?.timestamp ?? 0) - (frames.first?.timestamp ?? 0)),
             ],
         ]
@@ -92,6 +105,31 @@ class FrameExporter {
         }
         if let e = coordError { throw e }
         if let e = innerError { throw e }
+    }
+
+    /// Write a binary little-endian PLY point cloud (x,y,z float32 +
+    /// r,g,b uint8). ARMeshAnchor carries no vertex colour, so we seed a
+    /// neutral grey -- splatfacto learns real colour from the RGB frames
+    /// during training; the init colour only affects the very first iters.
+    private func writeBinaryPLY(vertices: [simd_float3], to url: URL) throws {
+        var header = "ply\n"
+        header += "format binary_little_endian 1.0\n"
+        header += "element vertex \(vertices.count)\n"
+        header += "property float x\nproperty float y\nproperty float z\n"
+        header += "property uchar red\nproperty uchar green\nproperty uchar blue\n"
+        header += "end_header\n"
+
+        var data = Data(header.utf8)
+        data.reserveCapacity(data.count + vertices.count * 15)
+        let grey: [UInt8] = [180, 180, 180]
+        for v in vertices {
+            var x = v.x, y = v.y, z = v.z
+            withUnsafeBytes(of: &x) { data.append(contentsOf: $0) }
+            withUnsafeBytes(of: &y) { data.append(contentsOf: $0) }
+            withUnsafeBytes(of: &z) { data.append(contentsOf: $0) }
+            data.append(contentsOf: grey)
+        }
+        try data.write(to: url)
     }
 
     private func deviceModel() -> String {

@@ -68,6 +68,15 @@ class CaptureManager {
 
     func stopRecordingAndExport() throws -> ExportResult {
         isRecording = false
+
+        // Grab the fused LiDAR mesh BEFORE clearing the frame sink / tearing
+        // down: these ARMeshAnchors are ARKit's realtime reconstruction (the
+        // blue overlay). Their vertices are the geometry seed the server uses
+        // to init the gaussian splat -- no COLMAP, works on blank walls.
+        let meshVertices = Self.extractWorldVertices(
+            from: ArkitSessionHost.shared.currentMeshAnchors()
+        )
+
         ArkitSessionHost.shared.onFrame = nil
         let start = recordingStart ?? Date()
         let duration = Date().timeIntervalSince(start)
@@ -76,7 +85,7 @@ class CaptureManager {
             .appendingPathComponent("scan_\(UUID().uuidString.prefix(8)).zip")
 
         let exporter = FrameExporter()
-        try exporter.export(frames: frames, to: exportURL)
+        try exporter.export(frames: frames, meshVertices: meshVertices, to: exportURL)
 
         return ExportResult(
             archivePath: exportURL.path,
@@ -158,6 +167,35 @@ class CaptureManager {
 
     private var tempDir: URL {
         FileManager.default.temporaryDirectory.appendingPathComponent("arkit_scan")
+    }
+
+    // MARK: - Mesh extraction
+
+    /// Flatten every ARMeshAnchor's vertices into a single world-space point
+    /// list. Each anchor stores vertices in its own local frame; multiply by
+    /// `anchor.transform` to lift them into the shared ARKit world frame (the
+    /// same frame the camera poses live in), so points and cameras stay
+    /// consistent for the splat trainer.
+    static func extractWorldVertices(from anchors: [ARMeshAnchor]) -> [simd_float3] {
+        var out: [simd_float3] = []
+        for anchor in anchors {
+            let geometry = anchor.geometry
+            let vertices = geometry.vertices
+            let count = vertices.count
+            guard count > 0 else { continue }
+            let base = vertices.buffer.contents()
+            let stride = vertices.stride
+            let offset = vertices.offset
+            out.reserveCapacity(out.count + count)
+            for i in 0..<count {
+                let ptr = base.advanced(by: offset + i * stride)
+                    .assumingMemoryBound(to: (Float, Float, Float).self)
+                let v = ptr.pointee
+                let world = anchor.transform * simd_float4(v.0, v.1, v.2, 1)
+                out.append(simd_float3(world.x, world.y, world.z))
+            }
+        }
+        return out
     }
 
     // MARK: - Depth / Confidence saving
