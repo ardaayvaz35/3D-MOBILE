@@ -37,10 +37,11 @@ class CaptureManager {
     }
 
     private static let angleSectorCount = 12
-    // Cap the capture rate: ARKit delivers ~60 fps, but photogrammetry only
-    // needs a few well-spaced frames per second. Saving every frame produced
-    // ~360 MB scans. ~3 fps keeps a 30 s room scan around 20-30 MB.
-    private static let minFrameInterval: TimeInterval = 0.33
+    // Cap the capture rate. ARKit delivers ~60 fps; we don't need every frame,
+    // but for a HIGH-DETAIL splat we want dense, well-spaced views (more angles
+    // -> sharper reconstruction). ~5 fps + high-quality JPEG trades a bigger
+    // archive (needs the raised Supabase upload limit) for finer detail.
+    private static let minFrameInterval: TimeInterval = 0.2
     private var lastCaptureTime: TimeInterval = 0
 
     private let onFrame: (Int, Double) -> Void  // (frameCount, angleCoveragePct 0..1)
@@ -127,7 +128,7 @@ class CaptureManager {
 
         if let jpeg = CIContext().jpegRepresentation(
             of: rgbImage, colorSpace: rgbImage.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!,
-            options: [CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): 0.6]
+            options: [CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): 0.9]
         ) {
             try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
             try? jpeg.write(to: URL(fileURLWithPath: rgbPath))
