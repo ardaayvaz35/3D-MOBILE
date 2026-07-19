@@ -36,9 +36,7 @@
         {
           "cameraPermission": "3D tarama için kamera gerekiyor"
         }
-      ],
-      "expo-sharing",
-      "expo-status-bar"
+      ]
     ],
     "extra": {
       "eas": {
