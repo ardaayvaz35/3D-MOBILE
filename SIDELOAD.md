@@ -1,7 +1,12 @@
 # Testing on a real iPhone from Windows, without a Mac
 
-This is the workaround used while the Apple Developer Program enrollment is
-unresolved. It needs no paid membership and no Mac of your own.
+> Status: this is no longer the primary path. The Apple Developer Program
+> membership went active on 10 September 2026 (Team ID MYA335W4Y9, Individual,
+> Italy), so `eas build --profile development --platform ios` is now the normal
+> way to get a build onto the phone. Keep this document as a fallback for when
+> EAS build credits run out.
+
+This workaround needs no paid membership and no Mac of your own.
 
 The build happens on a GitHub-hosted macOS runner. The signing happens on your
 Windows PC with Sideloadly, using a free Apple ID. ARKit and LiDAR work in this
@@ -46,14 +51,27 @@ native project.
 
 - The free signature expires after 7 days. Reinstall with Sideloadly to renew.
 - A free Apple ID can hold 3 sideloaded apps at once.
-- GitHub bills macOS runner minutes at 10x, so a free account has roughly 200
-  macOS minutes a month. Prefer `Debug` and iterate over Metro rather than
-  rebuilding.
+- Standard GitHub-hosted runners are free while this repository is public. If
+  you make it private, macOS minutes bill at 10x and a free account gets
+  roughly 200 macOS minutes a month. Either way, prefer `Debug` and iterate
+  over Metro rather than rebuilding.
+- The device must actually have a LiDAR sensor. That means an iPhone Pro or
+  Pro Max from the 12 series onward, or an iPad Pro from 2020 onward. The
+  native module checks this with `supportsSceneReconstruction` and reports the
+  device as unsupported rather than crashing.
 - Push notifications, App Groups and associated domains do not work under free
   provisioning. This project does not use them.
 
-## When enrollment is approved
+## The primary path now that enrollment is approved
 
-None of this is needed. EAS Build compiles on Expo's macOS machines and
-installs over TestFlight or internal distribution, still with no Mac of your
-own. Keep `eas.json` as the path back.
+EAS Build compiles on Expo's macOS machines, so no Mac is needed there either:
+
+    npm install -g eas-cli
+    eas login
+    eas device:create                                  # register the iPhone once
+    eas build --profile development --platform ios
+
+EAS creates the certificate and provisioning profile against Team ID
+MYA335W4Y9 on its own. Install the finished build from the QR link, then run
+`npx expo start --dev-client` as usual. Signatures last a year rather than
+seven days, and there is no 3-app limit.
