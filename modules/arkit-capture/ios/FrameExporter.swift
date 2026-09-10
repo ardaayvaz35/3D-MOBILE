@@ -58,8 +58,8 @@ class FrameExporter {
                     intrinsics[2, 0], intrinsics[2, 1],
                 ],
                 "camera_transform": matrix4x4ToArray(frame.transform),
-                "image_width": 1920,
-                "image_height": 1440,
+                "image_width": frame.imageWidth,
+                "image_height": frame.imageHeight,
             ])
         }
 

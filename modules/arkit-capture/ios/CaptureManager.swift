@@ -28,6 +28,10 @@ class CaptureManager {
         let confidencePath: String
         let intrinsics: simd_float3x3
         let transform: simd_float4x4
+        // JPEG'in gercek boyutlari. Kare kucultuldugunde intrinsics de ayni
+        // oranda olceklenir; metadata'ya sabit deger yazmak COLMAP'i yaniltir.
+        let imageWidth: Int
+        let imageHeight: Int
     }
 
     struct ExportResult {
@@ -41,24 +45,46 @@ class CaptureManager {
     // but for a HIGH-DETAIL splat we want dense, well-spaced views (more angles
     // -> sharper reconstruction). ~5 fps + high-quality JPEG trades a bigger
     // archive (needs the raised Supabase upload limit) for finer detail.
-    private static let minFrameInterval: TimeInterval = 0.2
+    private static let minFrameInterval: TimeInterval = 0.33
     private var lastCaptureTime: TimeInterval = 0
 
-    private let onFrame: (Int, Double) -> Void  // (frameCount, angleCoveragePct 0..1)
+    // Supabase ucretsiz plani tek nesne icin 50 MB siniri koyuyor ve bu sinir
+    // yukseltilemiyor. mesh.ply, metadata.json ve zip yukune pay birakip
+    // JPEG'lere bunun altinda bir butce veriyoruz. Butce dolunca yeni kare
+    // eklemeyi kesiyoruz, boylece yukleme 413 EntityTooLarge ile reddedilmiyor.
+    private static let imageByteBudget = 34 * 1024 * 1024
+    private static let jpegQuality: Double = 0.6
+    private static let targetLongEdge: CGFloat = 1280
+    private var imageBytesUsed = 0
+    private var budgetReached = false
+
+    // CIContext kurulumu pahali. Her karede yenisini yaratmak tarama sirasinda
+    // gozle gorulur takilmaya yol aciyordu.
+    private lazy var ciContext = CIContext()
+
+    /// (frameCount, angleCoveragePct 0..1, kullanilanBayt, butceDoldu)
+    private let onFrame: (Int, Double, Int, Bool) -> Void
     private(set) var isRecording = false
     private var frameCount = 0
     private var frames: [FrameData] = []
     private var recordingStart: Date?
     private var visitedSectors = Set<Int>()
 
-    init(onFrame: @escaping (Int, Double) -> Void) {
+    init(onFrame: @escaping (Int, Double, Int, Bool) -> Void) {
         self.onFrame = onFrame
+    }
+
+    /// Yukleme butcesinin ne kadari kullanildi (0..1).
+    var byteBudgetFraction: Double {
+        min(1.0, Double(imageBytesUsed) / Double(Self.imageByteBudget))
     }
 
     func startRecording() {
         frames.removeAll()
         frameCount = 0
         lastCaptureTime = 0
+        imageBytesUsed = 0
+        budgetReached = false
         visitedSectors.removeAll()
         isRecording = true
         recordingStart = Date()
@@ -118,24 +144,68 @@ class CaptureManager {
         }
         lastCaptureTime = frame.timestamp
 
-        let timestamp = frame.timestamp
-        let index = frameCount
-        frameCount += 1
-
-        let rgbImage = CIImage(cvPixelBuffer: frame.capturedImage)
-        let rgbName = "frame_\(String(format: "%06d", index)).jpg"
-        let rgbPath = tempDir.appendingPathComponent(rgbName).path
-
-        if let jpeg = CIContext().jpegRepresentation(
-            of: rgbImage, colorSpace: rgbImage.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!,
-            options: [CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): 0.9]
-        ) {
-            try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-            try? jpeg.write(to: URL(fileURLWithPath: rgbPath))
+        // Butce dolduysa yeni kare biriktirme, ama aci takibi ve olaylar aksin
+        // ki kullanici taramayi bitirmesi gerektigini ekranda gorsun.
+        if budgetReached {
+            registerAngleCoverage(transform: frame.camera.transform)
+            onFrame(frameCount, angleCoveragePct, imageBytesUsed, true)
+            return
         }
 
+        let timestamp = frame.timestamp
+        let index = frameCount
+
+        let rgbImage = CIImage(cvPixelBuffer: frame.capturedImage)
+
+        // Uzun kenari hedefe indir. 1920x1440 q0.9 kare basina ~500 KB tutuyordu
+        // ve bir dakikalik tarama 50 MB sinirini rahatlikla asiyordu.
+        let extent = rgbImage.extent
+        let longEdge = max(extent.width, extent.height)
+        let scale = longEdge > Self.targetLongEdge ? Self.targetLongEdge / longEdge : 1.0
+        let outImage = scale < 1.0
+            ? rgbImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            : rgbImage
+        let outWidth = Int(outImage.extent.width.rounded())
+        let outHeight = Int(outImage.extent.height.rounded())
+
+        guard let jpeg = ciContext.jpegRepresentation(
+            of: outImage,
+            colorSpace: outImage.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!,
+            options: [CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): Self.jpegQuality]
+        ) else {
+            return
+        }
+
+        if imageBytesUsed + jpeg.count > Self.imageByteBudget {
+            budgetReached = true
+            registerAngleCoverage(transform: frame.camera.transform)
+            onFrame(frameCount, angleCoveragePct, imageBytesUsed, true)
+            return
+        }
+
+        let rgbName = "frame_\(String(format: "%06d", index)).jpg"
+        let rgbPath = tempDir.appendingPathComponent(rgbName).path
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        do {
+            try jpeg.write(to: URL(fileURLWithPath: rgbPath))
+        } catch {
+            return
+        }
+        imageBytesUsed += jpeg.count
+        frameCount += 1
+
         let transform = frame.camera.transform
-        let intrinsics = frame.camera.intrinsics
+
+        // Goruntu kuculunce ic parametreler de ayni oranda kuculmeli, yoksa
+        // poz ile goruntu birbirini tutmaz ve rekonstruksiyon bozulur.
+        var intrinsics = frame.camera.intrinsics
+        if scale < 1.0 {
+            let s = Float(scale)
+            intrinsics[0, 0] *= s
+            intrinsics[1, 1] *= s
+            intrinsics[2, 0] *= s
+            intrinsics[2, 1] *= s
+        }
 
         frames.append(FrameData(
             index: index,
@@ -144,11 +214,13 @@ class CaptureManager {
             depthPath: "",
             confidencePath: "",
             intrinsics: intrinsics,
-            transform: transform
+            transform: transform,
+            imageWidth: outWidth,
+            imageHeight: outHeight
         ))
 
         registerAngleCoverage(transform: transform)
-        onFrame(frameCount, angleCoveragePct)
+        onFrame(frameCount, angleCoveragePct, imageBytesUsed, false)
     }
 
     private var angleCoveragePct: Double {

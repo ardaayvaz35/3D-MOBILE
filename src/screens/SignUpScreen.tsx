@@ -40,13 +40,24 @@ export default function SignUpScreen({ navigation }: Props) {
     }
     setLoading(true);
     try {
-      await signUp(email.trim(), password);
-      // AuthContext signUp session döndüyse zaten giriş yapmış olur
-      // Session yoksa email onayı gerekiyordur
+      const { needsEmailConfirmation } = await signUp(email.trim(), password);
+      if (!needsEmailConfirmation) {
+        // Oturum açıldı. RootNavigator zaten ana akışa geçiyor ve bu ekran
+        // sökülüyor; burada goBack çağırmak artık var olmayan bir navigatöre
+        // gider ve "GO_BACK was not handled" hatasını üretir.
+        return;
+      }
       Alert.alert(
         'Kayıt başarılı',
-        'Hesabın oluşturuldu. Artık giriş yapabilirsin.',
-        [{ text: 'Tamam', onPress: () => navigation.goBack() }]
+        'Hesabın oluşturuldu. Girişi tamamlamak için e-postana gönderilen onay bağlantısına tıkla.',
+        [
+          {
+            text: 'Tamam',
+            onPress: () => {
+              if (navigation.canGoBack()) navigation.goBack();
+            },
+          },
+        ]
       );
     } catch (err: any) {
       Alert.alert('Kayıt başarısız', err.message || 'Bir hata oluştu');
@@ -107,7 +118,10 @@ export default function SignUpScreen({ navigation }: Props) {
 
         <TouchableOpacity
           style={styles.linkButton}
-          onPress={() => navigation.goBack()}
+          onPress={() => {
+            if (navigation.canGoBack()) navigation.goBack();
+            else navigation.replace('SignIn');
+          }}
         >
           <Text style={styles.linkText}>Zaten hesabın var mı? Giriş Yap</Text>
         </TouchableOpacity>

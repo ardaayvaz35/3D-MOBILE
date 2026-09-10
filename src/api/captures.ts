@@ -73,6 +73,15 @@ export async function uploadCapture(
     headers: { 'Content-Type': archive.mimeType },
   });
   console.log('[upload] upload HTTP status:', uploadRes.status);
+  if (uploadRes.status === 413) {
+    // Supabase'in ücretsiz planı tek nesnede 50 MB'a izin veriyor ve bu sınır
+    // yükseltilemiyor. Ham gövdeyi göstermek kullanıcıya bir şey anlatmıyor.
+    const sizeMb = (info as any).size ? ((info as any).size / (1024 * 1024)).toFixed(1) : '?';
+    throw new Error(
+      `Tarama dosyası çok büyük (${sizeMb} MB). Sunucu tek dosyada en fazla 50 MB kabul ediyor. ` +
+        'Daha kısa bir tarama yap veya planı yükselt.'
+    );
+  }
   if (uploadRes.status < 200 || uploadRes.status >= 300) {
     throw new Error(
       `Yükleme başarısız (HTTP ${uploadRes.status}): ${uploadRes.body?.slice(0, 200) ?? ''}`

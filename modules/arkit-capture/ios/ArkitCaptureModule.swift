@@ -16,10 +16,12 @@ public class ArkitCaptureModule: Module {
 
     Function("startRecording") { () -> Void in
       if self.captureManager == nil {
-        self.captureManager = CaptureManager(onFrame: { count, angleCoverage in
+        self.captureManager = CaptureManager(onFrame: { count, angleCoverage, bytesUsed, limitReached in
           self.sendEvent("onFrameCaptured", [
             "frameCount": count,
             "angleCoverage": angleCoverage,
+            "bytesUsed": bytesUsed,
+            "storageLimitReached": limitReached,
           ])
         })
       }

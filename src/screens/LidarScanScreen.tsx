@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, Pressable, StyleSheet, SafeAreaView, ActivityIndicator, Alert, StatusBar } from 'react-native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
@@ -16,20 +16,44 @@ type Props = NativeStackScreenProps<RootStackParamList, 'LidarScan'>;
 
 const MIN_ANGLE_COVERAGE = 0.5; // ~6/12 sectors -- roughly half-way around
 
+// Native taraftaki JPEG butcesiyle ayni deger (CaptureManager.imageByteBudget).
+// Supabase ucretsiz plani tek nesnede 50 MB'a izin veriyor; mesh ve metadata
+// icin pay birakip goruntulere 34 MB ayiriyoruz.
+const ARCHIVE_BUDGET_BYTES = 34 * 1024 * 1024;
+const mb = (bytes: number) => (bytes / (1024 * 1024)).toFixed(1);
+
 export default function LidarScanScreen({ navigation }: Props) {
   const available = isArkitModuleAvailable() && isLidarSupported();
   const [recording, setRecording] = useState(false);
   const [frameCount, setFrameCount] = useState(0);
   const [angleCoverage, setAngleCoverage] = useState(0);
+  const [bytesUsed, setBytesUsed] = useState(0);
+  const [storageFull, setStorageFull] = useState(false);
   const [busy, setBusy] = useState(false);
+  const storageAlerted = useRef(false);
 
   useEffect(() => {
     const unsubscribe = onFrameCaptured((payload) => {
       setFrameCount(payload.frameCount);
       setAngleCoverage(payload.angleCoverage ?? 0);
+      setBytesUsed(payload.bytesUsed ?? 0);
+      if (payload.storageLimitReached) setStorageFull(true);
     });
     return unsubscribe;
   }, []);
+
+  // Butce dolunca native taraf yeni kare kaydetmiyor. Kullaniciyi bir kez
+  // uyarip taramayi bitirmeye yonlendir, yoksa bosuna gezmeye devam ediyor.
+  useEffect(() => {
+    if (!storageFull || storageAlerted.current) return;
+    storageAlerted.current = true;
+    Alert.alert(
+      'Kayit sinirina ulasildi',
+      'Bu tarama icin ayrilan alan doldu, yeni kareler artik kaydedilmiyor. ' +
+        'Taramayi bitirip yukleyebilirsin.',
+      [{ text: 'Tamam' }]
+    );
+  }, [storageFull]);
 
   if (!available) {
     return (
@@ -51,6 +75,9 @@ export default function LidarScanScreen({ navigation }: Props) {
     if (!recording) {
       setFrameCount(0);
       setAngleCoverage(0);
+      setBytesUsed(0);
+      setStorageFull(false);
+      storageAlerted.current = false;
       startLidarRecording();
       setRecording(true);
       return;
@@ -92,6 +119,8 @@ export default function LidarScanScreen({ navigation }: Props) {
 
   const coveragePct = Math.round(angleCoverage * 100);
   const coverageOk = angleCoverage >= MIN_ANGLE_COVERAGE;
+  const storagePct = Math.min(100, Math.round((bytesUsed / ARCHIVE_BUDGET_BYTES) * 100));
+  const storageColor = storageFull ? '#f87171' : storagePct > 75 ? '#eab308' : '#4ade80';
 
   return (
     <View style={styles.container}>
@@ -113,15 +142,29 @@ export default function LidarScanScreen({ navigation }: Props) {
               </View>
               <Text style={styles.coverageLabel}>{coveragePct}% açı</Text>
             </View>
+
+            <View style={styles.coverageRow}>
+              <View style={styles.coverageTrack}>
+                <View
+                  style={[
+                    styles.coverageFill,
+                    { width: `${storagePct}%`, backgroundColor: storageColor },
+                  ]}
+                />
+              </View>
+              <Text style={styles.coverageLabel}>{mb(bytesUsed)} MB</Text>
+            </View>
           </View>
 
           <View style={styles.bottomBar}>
             <Text style={styles.infoText}>
-              {recording
-                ? coverageOk
-                  ? 'İyi gidiyor — telefonu yavaşça gezdirmeye devam et, köşeleri ve tavanı da tara.'
-                  : 'Telefonu yavaşça duvarlara, zemine ve köşelere doğrult — LiDAR yüzeyleri tarıyor (mavi kaplama).'
-                : "Başlat'a bas ve telefonu odada yavaşça gezdir. LiDAR yüzeyleri ölçer — boş/düz duvarlar da çalışır."}
+              {!recording
+                ? "Başlat'a bas ve telefonu odada yavaşça gezdir. LiDAR yüzeyleri ölçer, boş ve düz duvarlar da çalışır."
+                : storageFull
+                  ? 'Kayıt sınırına ulaşıldı. Durdur ve Yükle ile taramayı tamamla.'
+                  : coverageOk
+                    ? 'İyi gidiyor. Telefonu yavaşça gezdirmeye devam et, köşeleri ve tavanı da tara.'
+                    : 'Telefonu yavaşça duvarlara, zemine ve köşelere doğrult. Taranan yüzeyler mavi ağ ile işaretleniyor.'}
             </Text>
 
             <Pressable

@@ -12,6 +12,14 @@ export type FrameCapturedPayload = {
    * covering one side).
    */
   angleCoverage: number;
+  /** Arsivde su ana kadar kullanilan JPEG baytlari. */
+  bytesUsed: number;
+  /**
+   * Yukleme butcesi doldu. Supabase ucretsiz plani tek nesnede 50 MB'a izin
+   * veriyor, o yuzden bu noktadan sonra yeni kare kaydedilmiyor; kullaniciyi
+   * taramayi bitirmeye yonlendirmek gerekiyor.
+   */
+  storageLimitReached: boolean;
 };
 
 export type CaptureResult = {

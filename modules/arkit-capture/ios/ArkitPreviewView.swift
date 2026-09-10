@@ -2,22 +2,27 @@ import ExpoModulesCore
 import ARKit
 import SceneKit
 
-/// Live camera + AR preview with a Polycam-style scanning overlay: as the
-/// user sweeps the room, ARKit's scene-reconstruction mesh is drawn on top of
-/// the real surfaces as a translucent glowing-blue net. Newly scanned areas
-/// light up brighter and then settle onto the geometry, giving clear feedback
-/// about which surfaces have already been captured.
+/// Canli kamera + AR onizlemesi, uzerinde Polycam tarzi tarama agi.
+///
+/// Onceki surum mesh'i dolu ucgenler halinde, `.add` harmanlama ve derinlik
+/// yazmadan ciziyordu. Bu uc secim birlesince tum yuzeyler ust uste toplanip
+/// ekrani kaplayan tek parca mavi bir ortu gibi gorunuyordu. Simdi tel kafes
+/// olarak, normal alfa harmanlamayla ve derinlik testiyle ciziliyor; boylece
+/// yakin yuzeyler uzaktakileri kapatiyor ve kamera goruntusu okunur kaliyor.
 class ArkitPreviewView: ExpoView, ARSCNViewDelegate {
     private let sceneView = ARSCNView()
+
+    /// Mesh guncellemelerini kisitla. ARKit her karede onlarca mesh anchor'i
+    /// guncelleyebiliyor; hepsi icin SCNGeometry yeniden kurmak tarama
+    /// sirasinda belirgin takilmaya yol aciyordu.
+    private static let minRebuildInterval: TimeInterval = 0.4
+    private var lastRebuild: [UUID: TimeInterval] = [:]
 
     required init(appContext: AppContext? = nil) {
         super.init(appContext: appContext)
         sceneView.session = ArkitSessionHost.shared.session
         sceneView.automaticallyUpdatesLighting = true
         sceneView.delegate = self
-        // rendersContinuously keeps the overlay smooth even when the camera is
-        // still, so the "settling" animation of new mesh doesn't stutter.
-        sceneView.rendersContinuously = true
         addSubview(sceneView)
         ArkitSessionHost.shared.start()
     }
@@ -27,77 +32,89 @@ class ArkitPreviewView: ExpoView, ARSCNViewDelegate {
         sceneView.frame = bounds
     }
 
-    // MARK: - Mesh overlay
+    // MARK: - Overlay materyali
 
-    /// Builds the translucent-blue material used for the scan overlay.
-    private func makeScanMaterial(bright: Bool) -> SCNMaterial {
-        let material = SCNMaterial()
-        // Glowing cyan-blue, semi-transparent so the camera feed shows through.
-        material.diffuse.contents = UIColor(red: 0.20, green: 0.65, blue: 1.0,
-                                            alpha: bright ? 0.55 : 0.30)
-        material.emission.contents = UIColor(red: 0.20, green: 0.65, blue: 1.0,
-                                             alpha: bright ? 0.9 : 0.4)
-        material.isDoubleSided = true
-        material.fillMode = .fill
-        material.blendMode = .add
-        material.writesToDepthBuffer = false
-        return material
-    }
+    /// Tel kafes materyali. Dolu yuzey yerine ag cizmek hem yuzeyin taranmis
+    /// oldugunu gosteriyor hem de altindaki kamera goruntusunu kapatmiyor.
+    private static let scanMaterial: SCNMaterial = {
+        let m = SCNMaterial()
+        m.diffuse.contents = UIColor(red: 0.25, green: 0.70, blue: 1.0, alpha: 0.9)
+        m.emission.contents = UIColor(red: 0.25, green: 0.70, blue: 1.0, alpha: 0.35)
+        m.fillMode = .lines
+        m.isDoubleSided = true
+        m.blendMode = .alpha
+        m.lightingModel = .constant
+        // Derinlik testi acik: yakin duvar arkadakini kapatiyor, boylece ag
+        // sahnenin uzerinde yuzen bir ortu gibi degil, yuzeye yapismis gorunuyor.
+        m.readsFromDepthBuffer = true
+        m.writesToDepthBuffer = true
+        return m
+    }()
 
-    /// Converts an ARMeshGeometry into a renderable SCNGeometry.
-    private func makeGeometry(from meshGeometry: ARMeshGeometry) -> SCNGeometry {
+    /// ARMeshGeometry'yi cizilebilir bir SCNGeometry'ye cevirir.
+    ///
+    /// Onemli: ARKit'in MTLBuffer'lari yeniden kullanilip uzerine yaziliyor.
+    /// Onceki surum `bytesNoCopy` ile bu bellege dogrudan bakiyordu, bu yuzden
+    /// zaman zaman bozuk ucgenler ciziliyordu. Burada veriyi kopyaliyoruz.
+    private func makeGeometry(from meshGeometry: ARMeshGeometry) -> SCNGeometry? {
         let vertices = meshGeometry.vertices
         let faces = meshGeometry.faces
+        guard vertices.count > 0, faces.count > 0 else { return nil }
 
-        let vertexSource = SCNGeometrySource(
-            buffer: vertices.buffer,
-            vertexFormat: vertices.format,
+        let vertexBytes = vertices.offset + vertices.count * vertices.stride
+        guard vertexBytes <= vertices.buffer.length else { return nil }
+        let vertexData = Data(bytes: vertices.buffer.contents(), count: vertexBytes)
+
+        let source = SCNGeometrySource(
+            data: vertexData,
             semantic: .vertex,
-            vertexCount: vertices.count,
+            vectorCount: vertices.count,
+            usesFloatComponents: true,
+            componentsPerVector: 3,
+            bytesPerComponent: MemoryLayout<Float>.size,
             dataOffset: vertices.offset,
             dataStride: vertices.stride
         )
 
-        let faceData = Data(
-            bytesNoCopy: faces.buffer.contents(),
-            count: faces.buffer.length,
-            deallocator: .none
-        )
+        // Tum buffer uzunlugu yerine gercek indeks sayisini kullan; buffer
+        // sonunda kullanilmayan alan olabiliyor ve fazlasi cop ucgen uretiyor.
+        let indexBytes = faces.count * faces.indexCountPerPrimitive * faces.bytesPerIndex
+        guard indexBytes <= faces.buffer.length else { return nil }
+        let indexData = Data(bytes: faces.buffer.contents(), count: indexBytes)
+
         let element = SCNGeometryElement(
-            data: faceData,
+            data: indexData,
             primitiveType: .triangles,
             primitiveCount: faces.count,
             bytesPerIndex: faces.bytesPerIndex
         )
 
-        return SCNGeometry(sources: [vertexSource], elements: [element])
+        let geometry = SCNGeometry(sources: [source], elements: [element])
+        geometry.materials = [Self.scanMaterial]
+        return geometry
     }
 
     func renderer(_ renderer: SCNSceneRenderer, nodeFor anchor: ARAnchor) -> SCNNode? {
         guard let meshAnchor = anchor as? ARMeshAnchor else { return nil }
         let node = SCNNode()
-        let geometry = makeGeometry(from: meshAnchor.geometry)
-        geometry.materials = [makeScanMaterial(bright: true)]
-        node.geometry = geometry
-
-        // Fade freshly scanned chunks from bright -> settled after a beat.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak node] in
-            guard let node, let geo = node.geometry else { return }
-            let settled = SCNMaterial()
-            settled.diffuse.contents = UIColor(red: 0.20, green: 0.65, blue: 1.0, alpha: 0.30)
-            settled.emission.contents = UIColor(red: 0.20, green: 0.65, blue: 1.0, alpha: 0.4)
-            settled.isDoubleSided = true
-            settled.blendMode = .add
-            settled.writesToDepthBuffer = false
-            geo.materials = [settled]
-        }
+        node.geometry = makeGeometry(from: meshAnchor.geometry)
+        lastRebuild[anchor.identifier] = CACurrentMediaTime()
         return node
     }
 
     func renderer(_ renderer: SCNSceneRenderer, didUpdate node: SCNNode, for anchor: ARAnchor) {
         guard let meshAnchor = anchor as? ARMeshAnchor else { return }
-        let geometry = makeGeometry(from: meshAnchor.geometry)
-        geometry.materials = node.geometry?.materials ?? [makeScanMaterial(bright: false)]
-        node.geometry = geometry
+        let now = CACurrentMediaTime()
+        if let last = lastRebuild[anchor.identifier], now - last < Self.minRebuildInterval {
+            return
+        }
+        lastRebuild[anchor.identifier] = now
+        if let geometry = makeGeometry(from: meshAnchor.geometry) {
+            node.geometry = geometry
+        }
+    }
+
+    func renderer(_ renderer: SCNSceneRenderer, didRemove node: SCNNode, for anchor: ARAnchor) {
+        lastRebuild.removeValue(forKey: anchor.identifier)
     }
 }
