@@ -17,7 +17,14 @@ final class ArkitSessionHost: NSObject, ARSessionDelegate {
         session.delegate = self
     }
 
+    /// Number of live preview views. The session is shared, so it must outlive
+    /// any single view -- React Native can build the replacement view before
+    /// tearing down the old one, and pausing on that teardown would kill a
+    /// session that was just handed to the new view.
+    private var viewCount = 0
+
     func start() {
+        viewCount += 1
         guard !isRunning else { return }
         guard ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) else { return }
         let config = ARWorldTrackingConfiguration()
@@ -27,9 +34,24 @@ final class ArkitSessionHost: NSObject, ARSessionDelegate {
         isRunning = true
     }
 
+    /// Balances `start()`. The session only actually stops once the last
+    /// preview view is gone.
+    ///
+    /// This was the missing half: `pause()` existed but nothing ever called
+    /// it, so after a scan the phone kept running LiDAR, mesh reconstruction
+    /// and the camera at full rate until the app was force-quit. It got hot
+    /// enough to be the first thing a user complained about.
+    func stop() {
+        viewCount = max(0, viewCount - 1)
+        guard viewCount == 0 else { return }
+        pause()
+    }
+
     func pause() {
+        guard isRunning else { return }
         session.pause()
         isRunning = false
+        onFrame = nil
     }
 
     /// All LiDAR-reconstructed mesh anchors currently tracked by the session.

@@ -27,6 +27,33 @@ class ArkitPreviewView: ExpoView, ARSCNViewDelegate {
         ArkitSessionHost.shared.start()
     }
 
+    deinit {
+        // Without this the shared session outlives the screen and keeps LiDAR,
+        // mesh reconstruction and the camera running for the life of the app.
+        releaseSession()
+    }
+
+    override func willMove(toWindow newWindow: UIWindow?) {
+        super.willMove(toWindow: newWindow)
+        // deinit alone is not enough: React Native can hold the view past the
+        // point where it leaves the screen, and the session would keep running
+        // until that reference happens to drop.
+        if newWindow == nil {
+            releaseSession()
+        }
+    }
+
+    /// Balances the `start()` in init exactly once, whichever teardown path
+    /// fires first -- a second decrement would let a live preview's session be
+    /// stopped out from under it.
+    private var didReleaseSession = false
+
+    private func releaseSession() {
+        guard !didReleaseSession else { return }
+        didReleaseSession = true
+        ArkitSessionHost.shared.stop()
+    }
+
     override func layoutSubviews() {
         super.layoutSubviews()
         sceneView.frame = bounds
