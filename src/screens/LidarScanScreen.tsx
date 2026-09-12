@@ -11,6 +11,12 @@ import {
   ArkitPreviewView,
 } from '../native/arkitCapture';
 import { uploadCapture } from '../api/captures';
+import {
+  clearPendingUpload,
+  loadPendingUpload,
+  savePendingUpload,
+  type PendingUpload,
+} from '../api/pendingUpload';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'LidarScan'>;
 
@@ -30,7 +36,15 @@ export default function LidarScanScreen({ navigation }: Props) {
   const [bytesUsed, setBytesUsed] = useState(0);
   const [storageFull, setStorageFull] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [pending, setPending] = useState<PendingUpload | null>(null);
   const storageAlerted = useRef(false);
+
+  // A scan that was captured but never reached the server -- including one
+  // lost to the app being killed mid-upload -- is offered back on arrival
+  // instead of being silently abandoned.
+  useEffect(() => {
+    loadPendingUpload().then(setPending);
+  }, []);
 
   useEffect(() => {
     const unsubscribe = onFrameCaptured((payload) => {
@@ -105,13 +119,42 @@ export default function LidarScanScreen({ navigation }: Props) {
     setBusy(true);
     try {
       const result = await stopLidarRecording();
-      const uploadResult = await uploadCapture(
-        { uri: `file://${result.archivePath}`, name: 'scan.zip', mimeType: 'application/zip' },
-        'ios_lidar'
-      );
-      navigation.replace('Status', { captureId: uploadResult.capture_id });
+      // Record the archive BEFORE uploading. Everything after this point can
+      // fail or be killed by the OS, and without this the scan would be
+      // unrecoverable -- which is what happened to a 2.6-minute scan that
+      // vanished with no error on screen.
+      await savePendingUpload({
+        archivePath: result.archivePath,
+        clientType: 'ios_lidar',
+        frameCount: result.frameCount,
+      });
+      await sendArchive(result.archivePath);
     } catch (err: any) {
       Alert.alert('Hata', err?.message ?? String(err));
+      setBusy(false);
+    }
+  };
+
+  /// Upload an archive that is already on disk, whether it was just captured
+  /// or is being retried after a failure.
+  const sendArchive = async (archivePath: string) => {
+    setBusy(true);
+    try {
+      const uploadResult = await uploadCapture(
+        { uri: `file://${archivePath}`, name: 'scan.zip', mimeType: 'application/zip' },
+        'ios_lidar'
+      );
+      await clearPendingUpload();
+      setPending(null);
+      navigation.replace('Status', { captureId: uploadResult.capture_id });
+    } catch (err: any) {
+      // The archive stays on disk and stays recorded, so this is recoverable.
+      const stored = await loadPendingUpload();
+      setPending(stored);
+      Alert.alert(
+        'Yükleme başarısız',
+        `${err?.message ?? String(err)}\n\nTarama telefonda saklandı, tekrar deneyebilirsin.`
+      );
     } finally {
       setBusy(false);
     }
@@ -156,6 +199,15 @@ export default function LidarScanScreen({ navigation }: Props) {
             </View>
           </View>
 
+          {pending && !recording && !busy ? (
+            <Pressable style={styles.pendingBanner} onPress={() => sendArchive(pending.archivePath)}>
+              <Text style={styles.pendingTitle}>Yüklenmemiş tarama var</Text>
+              <Text style={styles.pendingBody}>
+                {pending.frameCount} kare, telefonda saklı. Tekrar yüklemek için dokun.
+              </Text>
+            </Pressable>
+          ) : null}
+
           <View style={styles.bottomBar}>
             <Text style={styles.infoText}>
               {!recording
@@ -192,6 +244,15 @@ const styles = StyleSheet.create({
   title: { color: '#fff', fontSize: 18, fontWeight: '700', textAlign: 'center' },
   infoText: { color: '#fff', fontSize: 14, textAlign: 'center', lineHeight: 20 },
   overlay: { flex: 1, justifyContent: 'space-between' },
+  pendingBanner: {
+    marginHorizontal: 16,
+    padding: 14,
+    borderRadius: 12,
+    gap: 4,
+    backgroundColor: 'rgba(234,179,8,0.92)',
+  },
+  pendingTitle: { color: '#1c1917', fontSize: 15, fontWeight: '700' },
+  pendingBody: { color: '#1c1917', fontSize: 13, lineHeight: 18 },
   topBar: {
     padding: 16,
     paddingTop: 50,

@@ -5,11 +5,19 @@ import simd
 /// that matches the 3D scanner backend's expected schema (client_type: ios_lidar).
 class FrameExporter {
 
+    /// `captureDir` is where CaptureManager already wrote every JPEG. The
+    /// archive is assembled in place: the previous version created a second
+    /// directory and copied all of them into it, which for a full-length scan
+    /// meant ~465 file copies and a second 34 MB on disk purely to rename
+    /// nothing. Writing mesh.ply and metadata.json alongside the frames and
+    /// zipping that directory produces the identical archive for none of the
+    /// I/O -- and removes a step that was running while the phone was hot and
+    /// close to being killed by the OS.
     func export(frames: [CaptureManager.FrameData],
                 meshVertices: [simd_float3] = [],
+                captureDir: URL,
                 to url: URL) throws {
-        let workDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("export_\(UUID().uuidString.prefix(8))")
+        let workDir = captureDir
         try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
 
         // Write the fused LiDAR mesh as a binary PLY point cloud (the splat
@@ -25,26 +33,17 @@ class FrameExporter {
 
         for frame in frames {
             let rgbFile = URL(fileURLWithPath: frame.rgbPath)
-            let rgbDest = workDir.appendingPathComponent(rgbFile.lastPathComponent)
-            try? FileManager.default.copyItem(atPath: frame.rgbPath, toPath: rgbDest.path)
+            // Already inside workDir -- nothing to copy. Only reference it, and
+            // only if it really is on disk: a frame listed in metadata.json but
+            // missing from the archive fails the whole run on the server.
+            guard FileManager.default.fileExists(atPath: frame.rgbPath) else { continue }
 
-            // Depth/confidence are no longer persisted (COLMAP path uses RGB
-            // only); copy + reference them only if present.
-            var depthName = ""
-            if !frame.depthPath.isEmpty {
-                let depthFile = URL(fileURLWithPath: frame.depthPath)
-                depthName = depthFile.lastPathComponent
-                try? FileManager.default.copyItem(atPath: frame.depthPath,
-                                                  toPath: workDir.appendingPathComponent(depthName).path)
-            }
-
-            var confName = ""
-            if !frame.confidencePath.isEmpty {
-                let confFile = URL(fileURLWithPath: frame.confidencePath)
-                confName = confFile.lastPathComponent
-                try? FileManager.default.copyItem(atPath: frame.confidencePath,
-                                                  toPath: workDir.appendingPathComponent(confName).path)
-            }
+            // Depth/confidence are not persisted today (see CaptureManager);
+            // reference them only if a future build starts writing them.
+            let depthName = frame.depthPath.isEmpty
+                ? "" : URL(fileURLWithPath: frame.depthPath).lastPathComponent
+            let confName = frame.confidencePath.isEmpty
+                ? "" : URL(fileURLWithPath: frame.confidencePath).lastPathComponent
 
             let intrinsics = frame.intrinsics
             frameMetas.append([
@@ -70,7 +69,10 @@ class FrameExporter {
             "metadata": [
                 "device_model": deviceModel(),
                 "has_lidar": true,
-                "total_frames": frames.count,
+                // frameMetas, not frames: a frame whose JPEG is missing from
+                // disk is skipped above, and claiming it here would point the
+                // server at a file that is not in the archive.
+                "total_frames": frameMetas.count,
                 "mesh_vertex_count": meshVertices.count,
                 "duration_seconds": round((frames.last?.timestamp ?? 0) - (frames.first?.timestamp ?? 0)),
             ],

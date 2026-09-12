@@ -41,12 +41,38 @@ class CaptureManager {
     }
 
     private static let angleSectorCount = 12
-    // Cap the capture rate. ARKit delivers ~60 fps; we don't need every frame,
-    // but for a HIGH-DETAIL splat we want dense, well-spaced views (more angles
-    // -> sharper reconstruction). ~5 fps + high-quality JPEG trades a bigger
-    // archive (needs the raised Supabase upload limit) for finer detail.
-    private static let minFrameInterval: TimeInterval = 0.33
+
+    // Frame SELECTION, not a frame rate. A blind ~3 fps throttle spent the
+    // whole byte budget in 2.6 minutes -- and spent most of it on frames that
+    // teach the reconstruction nothing: standing still produces near-identical
+    // views, and whipping the phone around produces motion-blurred ones. A
+    // measured scan showed the cost of that: 86 frames over 28 s along a
+    // camera path only 1.65 m long, visibly blurred, covering 3.03 m of a
+    // 5.73 m room. 3DGS wants angular coverage and sharp frames, so select on
+    // exactly those two things and the same budget reaches around a whole room.
+    //
+    // A short interval still guards CPU (JPEG encoding is not free at 60 fps).
+    private static let minFrameInterval: TimeInterval = 0.1
+    // Keep a frame only once the camera has actually moved somewhere new.
+    // Sized against the byte budget, not just against what looks "new": a
+    // thorough room walk is on the order of 15 m of path, so an 8 cm step
+    // yields ~190 translation-triggered frames plus rotation-triggered ones
+    // -- roughly 250 frames, ~18 MB, comfortably inside the 34 MB budget.
+    // At 6 cm a continuous walk could still exhaust the budget mid-room,
+    // which is the failure we are fixing. 8 cm is also a healthy stereo
+    // baseline for 3DGS, so nothing is given up for the headroom.
+    private static let minTranslationMeters: Float = 0.08
+    private static let minRotationRadians: Float = 10.0 * .pi / 180.0
+    // Reject frames taken mid-swing: above this the exposure smears. The
+    // rate comes from consecutive ARKit poses, which costs nothing, rather
+    // than a per-frame Laplacian on the pixels, which would cost plenty.
+    private static let maxAngularSpeed: Float = 0.55  // rad/s
     private var lastCaptureTime: TimeInterval = 0
+    private var lastKeptTransform: simd_float4x4?
+    private var previousTransform: simd_float4x4?
+    private var previousTimestamp: TimeInterval = 0
+    private(set) var skippedBlurred = 0
+    private(set) var skippedRedundant = 0
 
     // Supabase ucretsiz plani tek nesne icin 50 MB siniri koyuyor ve bu sinir
     // yukseltilemiyor. mesh.ply, metadata.json ve zip yukune pay birakip
@@ -86,6 +112,16 @@ class CaptureManager {
         imageBytesUsed = 0
         budgetReached = false
         visitedSectors.removeAll()
+        lastKeptTransform = nil
+        previousTransform = nil
+        previousTimestamp = 0
+        skippedBlurred = 0
+        skippedRedundant = 0
+        // The capture directory is reused across scans and the archive is now
+        // zipped straight from it, so anything a previous scan left behind
+        // would be shipped inside this one. Start from an empty directory.
+        try? FileManager.default.removeItem(at: tempDir)
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         isRecording = true
         recordingStart = Date()
         ArkitSessionHost.shared.onFrame = { [weak self] frame in
@@ -105,14 +141,34 @@ class CaptureManager {
         )
 
         ArkitSessionHost.shared.onFrame = nil
+
+        // Put the camera, LiDAR and mesh fusion down BEFORE the heaviest step
+        // in the whole app. Export zips tens of megabytes across hundreds of
+        // files, and leaving a full-rate ARWorldTrackingConfiguration running
+        // underneath it competes for memory and heat on a phone that is
+        // already warm from the scan -- a 2.6-minute scan then died here with
+        // no error the user could see, which is exactly what an iOS
+        // termination looks like from the JS side.
+        //
+        // `pause()`, not `stop()`: stop() is reference-counted against live
+        // preview views and decrementing it here would corrupt that count.
+        // Pausing directly is idempotent, and the view's own teardown still
+        // balances its start() later.
+        ArkitSessionHost.shared.pause()
+
         let start = recordingStart ?? Date()
         let duration = Date().timeIntervalSince(start)
 
         let exportURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("scan_\(UUID().uuidString.prefix(8)).zip")
 
+        print("[capture] exporting \(frames.count) frames "
+              + "(\(imageBytesUsed / 1_048_576) MB; skipped \(skippedBlurred) blurred, "
+              + "\(skippedRedundant) redundant)")
+
         let exporter = FrameExporter()
-        try exporter.export(frames: frames, meshVertices: meshVertices, to: exportURL)
+        try exporter.export(frames: frames, meshVertices: meshVertices,
+                            captureDir: tempDir, to: exportURL)
 
         return ExportResult(
             archivePath: exportURL.path,
@@ -128,18 +184,39 @@ class CaptureManager {
     private func handle(frame: ARFrame) {
         guard isRecording else { return }
 
-        // Require an active LiDAR depth frame (ensures good tracking), but we no
-        // longer persist the depth/confidence buffers: the server reconstructs
-        // via COLMAP from the RGB frames only, and the raw depth maps roughly
-        // doubled the archive size (pushing scans over the upload limit).
+        // Require an active LiDAR depth frame: it is the cheapest available
+        // proof that tracking is healthy this instant.
+        //
+        // The per-frame depth/confidence buffers are still not persisted. The
+        // original reason given here -- "the server reconstructs via COLMAP
+        // from the RGB frames only" -- is out of date: the server now uses the
+        // fused LiDAR mesh (mesh.ply, written at export) to seed the splat and
+        // never runs COLMAP for this client type. Per-frame depth would add
+        // supervision on textureless walls on top of that seed; it is left off
+        // for now because it roughly doubles the archive against a hard 50 MB
+        // per-object upload cap, and the seed already carries most of the same
+        // geometry.
         guard frame.sceneDepth != nil else {
             return
         }
 
-        // Throttle to ~3 fps. Angle-coverage tracking still updates below so the
-        // UI progress stays responsive even for skipped frames.
+        let pose = frame.camera.transform
+
+        // Angular speed from consecutive poses, for the blur test below. Always
+        // update it, even on frames we go on to skip, or the rate would be
+        // measured across a gap and read as fast motion.
+        var angularSpeed: Float = 0
+        if let prev = previousTransform, frame.timestamp > previousTimestamp {
+            let dt = Float(frame.timestamp - previousTimestamp)
+            if dt > 0 { angularSpeed = Self.angleBetween(prev, pose) / dt }
+        }
+        previousTransform = pose
+        previousTimestamp = frame.timestamp
+
+        // Angle-coverage tracking updates on every skip path too, so the UI
+        // progress stays responsive whatever we decide about this frame.
         if frame.timestamp - lastCaptureTime < Self.minFrameInterval {
-            registerAngleCoverage(transform: frame.camera.transform)
+            registerAngleCoverage(transform: pose)
             return
         }
         lastCaptureTime = frame.timestamp
@@ -147,9 +224,31 @@ class CaptureManager {
         // Butce dolduysa yeni kare biriktirme, ama aci takibi ve olaylar aksin
         // ki kullanici taramayi bitirmesi gerektigini ekranda gorsun.
         if budgetReached {
-            registerAngleCoverage(transform: frame.camera.transform)
+            registerAngleCoverage(transform: pose)
             onFrame(frameCount, angleCoveragePct, imageBytesUsed, true)
             return
+        }
+
+        // Blur gate: a smeared frame actively hurts -- the optimiser fits the
+        // smear. Skipping costs nothing because the user is still moving and a
+        // sharp frame of the same view arrives a moment later.
+        if angularSpeed > Self.maxAngularSpeed {
+            skippedBlurred += 1
+            registerAngleCoverage(transform: pose)
+            return
+        }
+
+        // Novelty gate: measured against the last frame we KEPT, not the last
+        // frame seen, so holding the phone still consumes no budget at all.
+        // The first frame has no reference and is always kept.
+        if let kept = lastKeptTransform {
+            let moved = simd_distance(Self.translation(kept), Self.translation(pose))
+            let turned = Self.angleBetween(kept, pose)
+            if moved < Self.minTranslationMeters && turned < Self.minRotationRadians {
+                skippedRedundant += 1
+                registerAngleCoverage(transform: pose)
+                return
+            }
         }
 
         let timestamp = frame.timestamp
@@ -193,8 +292,12 @@ class CaptureManager {
         }
         imageBytesUsed += jpeg.count
         frameCount += 1
+        // Only advance the novelty reference once the frame is actually on
+        // disk; a failed write above must not make the next frame look
+        // redundant against a view we never stored.
+        lastKeptTransform = pose
 
-        let transform = frame.camera.transform
+        let transform = pose
 
         // Goruntu kuculunce ic parametreler de ayni oranda kuculmeli, yoksa
         // poz ile goruntu birbirini tutmaz ve rekonstruksiyon bozulur.
@@ -228,6 +331,31 @@ class CaptureManager {
     }
 
     /// Bucket the camera's world-space heading into a sector of a full circle.
+    /// World-space position from a camera-to-world matrix (column 3).
+    private static func translation(_ m: simd_float4x4) -> simd_float3 {
+        simd_float3(m.columns.3.x, m.columns.3.y, m.columns.3.z)
+    }
+
+    /// Absolute rotation angle between two poses, in radians (0...pi).
+    ///
+    /// From the trace of the relative rotation rather than via quaternions:
+    /// for R = Ra^T * Rb, trace(R) = 1 + 2*cos(angle). Both poses are rigid
+    /// ARKit transforms, so Ra^T is its inverse and no normalisation is
+    /// needed; clamping only guards float drift pushing acos out of domain.
+    private static func angleBetween(_ a: simd_float4x4, _ b: simd_float4x4) -> Float {
+        let r = rotationPart(a).transpose * rotationPart(b)
+        let trace = r[0].x + r[1].y + r[2].z
+        return acos(max(-1.0, min(1.0, (trace - 1.0) / 2.0)))
+    }
+
+    private static func rotationPart(_ m: simd_float4x4) -> simd_float3x3 {
+        simd_float3x3(
+            simd_float3(m.columns.0.x, m.columns.0.y, m.columns.0.z),
+            simd_float3(m.columns.1.x, m.columns.1.y, m.columns.1.z),
+            simd_float3(m.columns.2.x, m.columns.2.y, m.columns.2.z)
+        )
+    }
+
     private func registerAngleCoverage(transform: simd_float4x4) {
         // Camera looks down its own local -Z axis; column 2 is the camera's
         // Z axis in world space, so -column2 is forward.
