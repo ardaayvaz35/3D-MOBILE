@@ -23,9 +23,9 @@ type Props = NativeStackScreenProps<RootStackParamList, 'LidarScan'>;
 const MIN_ANGLE_COVERAGE = 0.5; // ~6/12 sectors -- roughly half-way around
 
 // Native taraftaki JPEG butcesiyle ayni deger (CaptureManager.imageByteBudget).
-// Supabase ucretsiz plani tek nesnede 50 MB'a izin veriyor; mesh ve metadata
-// icin pay birakip goruntulere 34 MB ayiriyoruz.
-const ARCHIVE_BUDGET_BYTES = 34 * 1024 * 1024;
+// R2'de nesne basina pratik bir sinir olmadigi icin bu artik depolama degil,
+// yukleme suresi ve telefon isinmasi butcesi. Ikisi birlikte guncellenmeli.
+const ARCHIVE_BUDGET_BYTES = 300 * 1024 * 1024;
 const mb = (bytes: number) => (bytes / (1024 * 1024)).toFixed(1);
 
 export default function LidarScanScreen({ navigation }: Props) {

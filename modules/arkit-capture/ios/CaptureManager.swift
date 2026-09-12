@@ -74,13 +74,19 @@ class CaptureManager {
     private(set) var skippedBlurred = 0
     private(set) var skippedRedundant = 0
 
-    // Supabase ucretsiz plani tek nesne icin 50 MB siniri koyuyor ve bu sinir
-    // yukseltilemiyor. mesh.ply, metadata.json ve zip yukune pay birakip
-    // JPEG'lere bunun altinda bir butce veriyoruz. Butce dolunca yeni kare
-    // eklemeyi kesiyoruz, boylece yukleme 413 EntityTooLarge ile reddedilmiyor.
-    private static let imageByteBudget = 34 * 1024 * 1024
-    private static let jpegQuality: Double = 0.6
-    private static let targetLongEdge: CGFloat = 1280
+    // Arsiv Cloudflare R2'ye yuklendigi icin nesne basina pratik bir sinir yok
+    // (tek PUT ile 5 GB). Onceki 34 MB butcesi Supabase'in 50 MB nesne
+    // sinirindan geliyordu ve kareleri 1280 piksele, %60 JPEG kalitesine
+    // dusurmeyi zorunlu kiliyordu -- splat kalitesini asil sinirlayan sey buydu.
+    //
+    // Artik ARKit'in verdigi cozunurlugu (1920x1440) oldugu gibi, gorsel olarak
+    // kayipsiz sayilabilecek bir kalitede gonderiyoruz. Butce yine var, ama
+    // artik depolama sinirini degil yukleme suresini ve telefon isinmasini
+    // sinirliyor: ~700 KB/kare ile 400+ kareye yetiyor, ki olculen en uzun
+    // tarama 186 kare kullandi.
+    private static let imageByteBudget = 300 * 1024 * 1024
+    private static let jpegQuality: Double = 0.9
+    private static let targetLongEdge: CGFloat = 1920
     private var imageBytesUsed = 0
     private var budgetReached = false
 
