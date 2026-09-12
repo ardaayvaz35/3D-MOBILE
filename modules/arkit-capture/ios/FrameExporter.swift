@@ -38,8 +38,10 @@ class FrameExporter {
             // missing from the archive fails the whole run on the server.
             guard FileManager.default.fileExists(atPath: frame.rgbPath) else { continue }
 
-            // Depth/confidence are not persisted today (see CaptureManager);
-            // reference them only if a future build starts writing them.
+            // Depth and confidence sit in workDir next to the JPEG, so they
+            // need no copying either. CaptureManager only fills these paths in
+            // once the buffer is on disk at its expected size, so a name here
+            // is a promise the file is really in the archive.
             let depthName = frame.depthPath.isEmpty
                 ? "" : URL(fileURLWithPath: frame.depthPath).lastPathComponent
             let confName = frame.confidencePath.isEmpty
@@ -59,6 +61,12 @@ class FrameExporter {
                 "camera_transform": matrix4x4ToArray(frame.transform),
                 "image_width": frame.imageWidth,
                 "image_height": frame.imageHeight,
+                // The depth buffer is raw and headerless, so these are the
+                // only record of its shape. They also let the server rescale
+                // the RGB intrinsics onto the depth grid, which is a ~7.5x
+                // correction and silently wrong if guessed.
+                "depth_width": frame.depthWidth,
+                "depth_height": frame.depthHeight,
             ])
         }
 
@@ -74,6 +82,9 @@ class FrameExporter {
                 // server at a file that is not in the archive.
                 "total_frames": frameMetas.count,
                 "mesh_vertex_count": meshVertices.count,
+                "depth_frames": frameMetas.filter {
+                    !(($0["depth_path"] as? String) ?? "").isEmpty
+                }.count,
                 "duration_seconds": round((frames.last?.timestamp ?? 0) - (frames.first?.timestamp ?? 0)),
             ],
         ]

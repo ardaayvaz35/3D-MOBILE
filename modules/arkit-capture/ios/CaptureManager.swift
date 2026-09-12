@@ -7,8 +7,8 @@ import simd
 /// the live preview view) as a frame sink -- it no longer owns its own
 /// ARSession. Captures per frame:
 ///   - RGB frame (JPEG)
-///   - Scene depth (16-bit PNG, millimeters)
-///   - Confidence map (8-bit PNG, 0-2)
+///   - Scene depth (raw little-endian UInt16, millimeters, no header)
+///   - Confidence map (raw UInt8, 0=low 1=medium 2=high, no header)
 ///   - Camera pose (world-space 4x4)
 ///   - Camera intrinsics (fx, fy, cx, cy)
 ///
@@ -32,6 +32,11 @@ class CaptureManager {
         // oranda olceklenir; metadata'ya sabit deger yazmak COLMAP'i yaniltir.
         let imageWidth: Int
         let imageHeight: Int
+        // Derinlik izgarasinin boyutlari (LiDAR cihazlarda 256x192). Ham
+        // tampon basliksiz yazildigi icin sunucu bunlar olmadan veriyi
+        // yeniden sekillendiremez; sabit varsaymak da cihaz degisince bozar.
+        let depthWidth: Int
+        let depthHeight: Int
     }
 
     struct ExportResult {
@@ -191,20 +196,25 @@ class CaptureManager {
         guard isRecording else { return }
 
         // Require an active LiDAR depth frame: it is the cheapest available
-        // proof that tracking is healthy this instant.
+        // proof that tracking is healthy this instant, and from here on it is
+        // also data we keep.
         //
-        // The per-frame depth/confidence buffers are still not persisted. The
-        // original reason given here -- "the server reconstructs via COLMAP
-        // from the RGB frames only" -- is out of date: the server now uses the
-        // fused LiDAR mesh (mesh.ply, written at export) to seed the splat and
-        // never runs COLMAP for this client type. Per-frame depth would add
-        // supervision on textureless walls on top of that seed; it is left off
-        // for now because it roughly doubles the archive against a hard 50 MB
-        // per-object upload cap, and the seed already carries most of the same
-        // geometry.
+        // Per-frame depth used to be dropped because it roughly doubled the
+        // archive against a hard 50 MB per-object upload cap. The archive
+        // moved to R2, so that cap is gone and the depth is worth far more
+        // than its ~150 KB a frame: it builds a seed cloud that is both much
+        // denser than ARKit's fused mesh and colored from the RGB frame, where
+        // the mesh carried no color at all.
         guard frame.sceneDepth != nil else {
             return
         }
+
+        // Prefer the temporally smoothed map where ARKit offers it. Both are
+        // requested in the session's frameSemantics; the smoothed one flickers
+        // far less between frames, which matters because every frame's points
+        // are merged into one cloud and per-frame noise does not average out,
+        // it accumulates as fog.
+        let depthFrame = frame.smoothedSceneDepth ?? frame.sceneDepth
 
         let pose = frame.camera.transform
 
@@ -262,8 +272,9 @@ class CaptureManager {
 
         let rgbImage = CIImage(cvPixelBuffer: frame.capturedImage)
 
-        // Uzun kenari hedefe indir. 1920x1440 q0.9 kare basina ~500 KB tutuyordu
-        // ve bir dakikalik tarama 50 MB sinirini rahatlikla asiyordu.
+        // Uzun kenari hedefe indir. targetLongEdge artik ARKit'in kendi
+        // cozunurlugu (1920) oldugu icin bu pratikte kopya gecmiyor; kanca,
+        // ileride farkli bir cihaz daha buyuk kare verirse diye duruyor.
         let extent = rgbImage.extent
         let longEdge = max(extent.width, extent.height)
         let scale = longEdge > Self.targetLongEdge ? Self.targetLongEdge / longEdge : 1.0
@@ -316,16 +327,53 @@ class CaptureManager {
             intrinsics[2, 1] *= s
         }
 
+        // Depth and confidence, written next to the JPEG under the same
+        // index so the export step can pair them up by name.
+        var depthPath = ""
+        var confidencePath = ""
+        var depthWidth = 0
+        var depthHeight = 0
+        if let depthFrame = depthFrame {
+            let map = depthFrame.depthMap
+            depthWidth = CVPixelBufferGetWidth(map)
+            depthHeight = CVPixelBufferGetHeight(map)
+
+            let dPath = tempDir.appendingPathComponent(
+                "depth_\(String(format: "%06d", index)).bin").path
+            saveDepth16(map, to: dPath)
+            // Only claim the file if it actually landed: a half-written or
+            // missing buffer must not be advertised in the metadata, or the
+            // worker reshapes garbage into geometry.
+            if let size = try? FileManager.default.attributesOfItem(atPath: dPath)[.size] as? Int,
+               size == depthWidth * depthHeight * 2 {
+                depthPath = dPath
+                imageBytesUsed += size
+            }
+
+            if let conf = depthFrame.confidenceMap {
+                let cPath = tempDir.appendingPathComponent(
+                    "conf_\(String(format: "%06d", index)).bin").path
+                saveConfidence(conf, to: cPath)
+                if let size = try? FileManager.default.attributesOfItem(atPath: cPath)[.size] as? Int,
+                   size == CVPixelBufferGetWidth(conf) * CVPixelBufferGetHeight(conf) {
+                    confidencePath = cPath
+                    imageBytesUsed += size
+                }
+            }
+        }
+
         frames.append(FrameData(
             index: index,
             timestamp: timestamp,
             rgbPath: rgbPath,
-            depthPath: "",
-            confidencePath: "",
+            depthPath: depthPath,
+            confidencePath: confidencePath,
             intrinsics: intrinsics,
             transform: transform,
             imageWidth: outWidth,
-            imageHeight: outHeight
+            imageHeight: outHeight,
+            depthWidth: depthWidth,
+            depthHeight: depthHeight
         ))
 
         registerAngleCoverage(transform: transform)
