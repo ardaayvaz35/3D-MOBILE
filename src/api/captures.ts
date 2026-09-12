@@ -52,13 +52,22 @@ type UploadTarget = {
   backend: 'r2' | 'supabase';
   uploadUrl: string;
   storagePath: string;
+  /// Why R2 was not used, when it was not. Carried so a later failure can say
+  /// what actually went wrong instead of only what went wrong second.
+  fallbackReason?: string;
 };
+
+// Supabase's free plan refuses a single object over 50 MB and the limit cannot
+// be raised. Full-resolution captures are routinely larger, so falling back to
+// it is only worth attempting for an archive that could actually fit.
+const SUPABASE_OBJECT_LIMIT_BYTES = 48 * 1024 * 1024;
 
 /// Ask the server for a presigned R2 URL, falling back to a Supabase signed
 /// upload URL. The R2 key is minted server-side (the client must not name its
 /// own path -- `submit-capture` authorises a capture by checking the path is
 /// under the caller's own user id).
 async function resolveUploadTarget(ext: string, mimeType: string): Promise<UploadTarget> {
+  let reason = 'bilinmeyen';
   try {
     const { data, error } = await supabase.functions.invoke('create-upload-url', {
       body: { ext, content_type: mimeType },
@@ -67,10 +76,16 @@ async function resolveUploadTarget(ext: string, mimeType: string): Promise<Uploa
       return { backend: 'r2', uploadUrl: data.upload_url, storagePath: data.storage_path };
     }
     // 501 r2_not_configured is expected until the bucket credentials are set;
-    // anything else is worth seeing in the log but is equally non-fatal.
-    console.log('[upload] R2 unavailable, using Supabase Storage:', (error as any)?.context?.error ?? error?.message);
+    // anything else still falls back, but the reason has to survive to the
+    // error the user actually sees.
+    reason =
+      (error as any)?.context?.error ??
+      error?.message ??
+      (data ? 'sunucu presigned URL döndürmedi' : 'yanıt boş');
+    console.log('[upload] R2 unavailable, using Supabase Storage:', reason);
   } catch (e: any) {
-    console.log('[upload] create-upload-url threw, using Supabase Storage:', e?.message ?? e);
+    reason = e?.message ?? String(e);
+    console.log('[upload] create-upload-url threw, using Supabase Storage:', reason);
   }
 
   const userId = await requireUserId();
@@ -82,7 +97,7 @@ async function resolveUploadTarget(ext: string, mimeType: string): Promise<Uploa
   if (signErr || !signed?.signedUrl) {
     throw new Error(`Yükleme URL'si alınamadı: ${signErr?.message ?? 'bilinmeyen hata'}`);
   }
-  return { backend: 'supabase', uploadUrl: signed.signedUrl, storagePath };
+  return { backend: 'supabase', uploadUrl: signed.signedUrl, storagePath, fallbackReason: reason };
 }
 
 export async function uploadCapture(
@@ -100,7 +115,18 @@ export async function uploadCapture(
   // at 50 MB on the free plan. Prefer R2 and keep the old path as a fallback so
   // capture keeps working if R2 is not configured yet.
   const target = await resolveUploadTarget(ext, archive.mimeType);
-  console.log('[upload] target:', target.backend, target.storagePath);
+  console.log('[upload] target:', target.backend, target.storagePath, target.fallbackReason ?? '');
+
+  // Pushing 140 MB at a store that caps objects at 50 MB wastes minutes of
+  // upload and then reports the size as if size were the problem. The real
+  // problem is whatever stopped us using R2, so say that instead.
+  if (target.backend === 'supabase' && sizeBytes > SUPABASE_OBJECT_LIMIT_BYTES) {
+    throw new Error(
+      `Bulut depolamaya (R2) bağlanılamadı, yedek depolama ise ${(sizeBytes / (1024 * 1024)).toFixed(0)} MB'lık ` +
+        `bu taramayı kabul etmiyor (sınır 50 MB).\n\nSebep: ${target.fallbackReason}\n\n` +
+        'Tarama telefonda duruyor. Bilgisayarda Metro çalışıyorsa uygulamayı kapatıp açıp tekrar dene.'
+    );
+  }
 
   // Stream the archive straight from disk. Reading a large scan zip into a JS
   // string/ArrayBuffer blows past the engine's string-length limit, so we PUT
@@ -112,14 +138,18 @@ export async function uploadCapture(
   });
   console.log('[upload] upload HTTP status:', uploadRes.status);
 
-  if (uploadRes.status === 413) {
-    // Only reachable on the Supabase fallback: its free plan is fixed at 50 MB
-    // per object and cannot be raised. Showing the raw body tells the user
-    // nothing, so explain the actual constraint.
+  // Supabase answers an over-size object with HTTP 400 and the real code in
+  // the body, so matching on the status alone never fired -- the user saw a raw
+  // JSON blob instead of an explanation.
+  const tooLarge =
+    uploadRes.status === 413 || (uploadRes.body ?? '').includes('EntityTooLarge');
+  if (tooLarge) {
+    // Reachable only on the Supabase fallback; the size guard above catches
+    // the common case, so getting here means the limit is lower than we think.
     const sizeMb = sizeBytes ? (sizeBytes / (1024 * 1024)).toFixed(1) : '?';
     throw new Error(
-      `Tarama dosyası çok büyük (${sizeMb} MB). Yedek depolama tek dosyada en fazla ` +
-        '50 MB kabul ediyor. Bulut depolama ayarlanınca bu sınır kalkacak.'
+      `Yedek depolama ${sizeMb} MB'lık dosyayı kabul etmedi (tek nesne sınırı). ` +
+        `R2 kullanılamadı, sebep: ${target.fallbackReason ?? 'bilinmiyor'}`
     );
   }
   if (uploadRes.status < 200 || uploadRes.status >= 300) {
