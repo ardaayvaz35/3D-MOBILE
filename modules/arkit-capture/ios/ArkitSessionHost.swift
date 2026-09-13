@@ -9,6 +9,11 @@ final class ArkitSessionHost: NSObject, ARSessionDelegate {
     static let shared = ArkitSessionHost()
 
     let session = ARSession()
+    /// Live coverage of the current recording; drawn by ArkitPreviewView.
+    let coverage = CoverageMap()
+    /// True while a recording is running, i.e. while the overlay should show
+    /// coverage colours instead of the plain scanning mesh.
+    var coverageActive = false
     var onFrame: ((ARFrame) -> Void)?
     var onTrackingStateChange: ((ARCamera.TrackingState) -> Void)?
     private(set) var isRunning = false

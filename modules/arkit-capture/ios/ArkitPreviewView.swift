@@ -17,6 +17,8 @@ class ArkitPreviewView: ExpoView, ARSCNViewDelegate {
     /// sirasinda belirgin takilmaya yol aciyordu.
     private static let minRebuildInterval: TimeInterval = 0.4
     private var lastRebuild: [UUID: TimeInterval] = [:]
+    private var lastCoverageRefresh: TimeInterval = 0
+    private var refreshCursor = 0
 
     required init(appContext: AppContext? = nil) {
         super.init(appContext: appContext)
@@ -78,12 +80,27 @@ class ArkitPreviewView: ExpoView, ARSCNViewDelegate {
         return m
     }()
 
+    /// Kapsama isi haritasi materyali: renk vertex basina CoverageMap'ten
+    /// geliyor, bu yuzden diffuse beyaz ve emisyon yok.
+    private static let coverageMaterial: SCNMaterial = {
+        let m = SCNMaterial()
+        m.diffuse.contents = UIColor.white
+        m.fillMode = .lines
+        m.isDoubleSided = true
+        m.blendMode = .alpha
+        m.lightingModel = .constant
+        m.readsFromDepthBuffer = true
+        m.writesToDepthBuffer = true
+        return m
+    }()
+
     /// ARMeshGeometry'yi cizilebilir bir SCNGeometry'ye cevirir.
     ///
     /// Onemli: ARKit'in MTLBuffer'lari yeniden kullanilip uzerine yaziliyor.
     /// Onceki surum `bytesNoCopy` ile bu bellege dogrudan bakiyordu, bu yuzden
     /// zaman zaman bozuk ucgenler ciziliyordu. Burada veriyi kopyaliyoruz.
-    private func makeGeometry(from meshGeometry: ARMeshGeometry) -> SCNGeometry? {
+    private func makeGeometry(from meshAnchor: ARMeshAnchor) -> SCNGeometry? {
+        let meshGeometry = meshAnchor.geometry
         let vertices = meshGeometry.vertices
         let faces = meshGeometry.faces
         guard vertices.count > 0, faces.count > 0 else { return nil }
@@ -116,15 +133,36 @@ class ArkitPreviewView: ExpoView, ARSCNViewDelegate {
             bytesPerIndex: faces.bytesPerIndex
         )
 
-        let geometry = SCNGeometry(sources: [source], elements: [element])
-        geometry.materials = [Self.scanMaterial]
+        var sources = [source]
+        if ArkitSessionHost.shared.coverageActive {
+            let colors = ArkitSessionHost.shared.coverage.vertexColors(
+                vertexData: vertexData,
+                offset: vertices.offset,
+                stride: vertices.stride,
+                count: vertices.count,
+                anchorTransform: meshAnchor.transform
+            )
+            sources.append(SCNGeometrySource(
+                data: colors,
+                semantic: .color,
+                vectorCount: vertices.count,
+                usesFloatComponents: true,
+                componentsPerVector: 4,
+                bytesPerComponent: MemoryLayout<Float>.size,
+                dataOffset: 0,
+                dataStride: 4 * MemoryLayout<Float>.size
+            ))
+        }
+
+        let geometry = SCNGeometry(sources: sources, elements: [element])
+        geometry.materials = [sources.count > 1 ? Self.coverageMaterial : Self.scanMaterial]
         return geometry
     }
 
     func renderer(_ renderer: SCNSceneRenderer, nodeFor anchor: ARAnchor) -> SCNNode? {
         guard let meshAnchor = anchor as? ARMeshAnchor else { return nil }
         let node = SCNNode()
-        node.geometry = makeGeometry(from: meshAnchor.geometry)
+        node.geometry = makeGeometry(from: meshAnchor)
         lastRebuild[anchor.identifier] = CACurrentMediaTime()
         return node
     }
@@ -136,9 +174,31 @@ class ArkitPreviewView: ExpoView, ARSCNViewDelegate {
             return
         }
         lastRebuild[anchor.identifier] = now
-        if let geometry = makeGeometry(from: meshAnchor.geometry) {
+        if let geometry = makeGeometry(from: meshAnchor) {
             node.geometry = geometry
         }
+    }
+
+    /// Mesh anchors only report updates while ARKit is still refining them,
+    /// so a wall meshed early would keep its first colour however long it was
+    /// scanned afterwards. Recolour a few anchors per tick, round-robin, so the
+    /// map keeps up without rebuilding every anchor on the render thread.
+    private static let coverageRefreshInterval: TimeInterval = 0.5
+    private static let anchorsPerRefresh = 6
+
+    func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
+        guard ArkitSessionHost.shared.coverageActive,
+              time - lastCoverageRefresh >= Self.coverageRefreshInterval else { return }
+        lastCoverageRefresh = time
+        let anchors = ArkitSessionHost.shared.currentMeshAnchors()
+        guard !anchors.isEmpty else { return }
+        for k in 0..<min(Self.anchorsPerRefresh, anchors.count) {
+            let anchor = anchors[(refreshCursor + k) % anchors.count]
+            guard let node = sceneView.node(for: anchor),
+                  let geometry = makeGeometry(from: anchor) else { continue }
+            node.geometry = geometry
+        }
+        refreshCursor = (refreshCursor + Self.anchorsPerRefresh) % anchors.count
     }
 
     func renderer(_ renderer: SCNSceneRenderer, didRemove node: SCNNode, for anchor: ARAnchor) {

@@ -211,12 +211,12 @@ export default function LidarScanScreen({ navigation }: Props) {
           <View style={styles.bottomBar}>
             <Text style={styles.infoText}>
               {!recording
-                ? "Başlat'a bas ve telefonu odada yavaşça gezdir. LiDAR yüzeyleri ölçer, boş ve düz duvarlar da çalışır."
+                ? "Telefonu normal aydınlık bir yere çevirip Başlat'a bas: pozlama o anda sabitlenir. Sonra odada yavaşça gezdir."
                 : storageFull
                   ? 'Kayıt sınırına ulaşıldı. Durdur ve Yükle ile taramayı tamamla.'
                   : coverageOk
-                    ? 'İyi gidiyor. Telefonu yavaşça gezdirmeye devam et, köşeleri ve tavanı da tara.'
-                    : 'Telefonu yavaşça duvarlara, zemine ve köşelere doğrult. Taranan yüzeyler mavi ağ ile işaretleniyor.'}
+                    ? 'İyi gidiyor. Sarı ve kırmızı kalan yerlere, özellikle köşelere ve tavana, başka açılardan da bak.'
+                    : 'Ağ renkleri: kırmızı hiç görülmedi, sarı az açıdan görüldü, yeşil iyi. Kırmızı ve sarı yerlere farklı açılardan bak.'}
             </Text>
 
             <Pressable

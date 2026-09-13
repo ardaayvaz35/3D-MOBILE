@@ -141,6 +141,8 @@ class CaptureManager {
         // Before the first frame is taken, so every kept frame shares one
         // exposure and one white balance. See lockExposureAndWhiteBalance().
         ArkitSessionHost.shared.lockExposureAndWhiteBalance()
+        ArkitSessionHost.shared.coverage.reset()
+        ArkitSessionHost.shared.coverageActive = true
         isRecording = true
         recordingStart = Date()
         ArkitSessionHost.shared.onFrame = { [weak self] frame in
@@ -151,6 +153,7 @@ class CaptureManager {
     func stopRecordingAndExport() throws -> ExportResult {
         isRecording = false
         ArkitSessionHost.shared.unlockExposureAndWhiteBalance()
+        ArkitSessionHost.shared.coverageActive = false
 
         // Grab the fused LiDAR mesh BEFORE clearing the frame sink / tearing
         // down: these ARMeshAnchors are ARKit's realtime reconstruction (the
@@ -388,6 +391,16 @@ class CaptureManager {
         ))
 
         registerAngleCoverage(transform: transform)
+        // Only KEPT frames count: coverage means "the server will have this".
+        if let depthFrame = depthFrame {
+            ArkitSessionHost.shared.coverage.integrate(
+                depthMap: depthFrame.depthMap,
+                confidenceMap: depthFrame.confidenceMap,
+                intrinsics: frame.camera.intrinsics,
+                imageResolution: frame.camera.imageResolution,
+                cameraTransform: pose
+            )
+        }
         onFrame(frameCount, angleCoveragePct, imageBytesUsed, false)
     }
 
