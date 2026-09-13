@@ -26,6 +26,12 @@ export type FrameCapturedPayload = {
    * recorded until the user slows down, so tell them now.
    */
   movingTooFast: boolean;
+  /**
+   * iOS thermal state when the event was sent: 0 nominal, 1 fair, 2 serious
+   * (native side halves the frame rate and slows the heat map), 3 critical
+   * (native side stops taking frames).
+   */
+  thermalState: number;
 };
 
 export type CaptureResult = {

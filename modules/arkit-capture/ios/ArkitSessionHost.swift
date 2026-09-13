@@ -35,7 +35,14 @@ final class ArkitSessionHost: NSObject, ARSessionDelegate {
         guard ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) else { return }
         let config = ARWorldTrackingConfiguration()
         config.sceneReconstruction = .mesh
-        config.frameSemantics = [.sceneDepth, .smoothedSceneDepth]
+        // One depth stream, not two. Both used to be requested, but only the
+        // smoothed map is saved; producing the raw one as well was pure load
+        // on a phone that already runs mesh reconstruction and the camera.
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
+            config.frameSemantics = [.smoothedSceneDepth]
+        } else {
+            config.frameSemantics = [.sceneDepth]
+        }
         session.run(config)
         isRunning = true
     }

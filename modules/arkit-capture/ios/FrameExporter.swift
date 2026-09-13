@@ -16,7 +16,8 @@ class FrameExporter {
     func export(frames: [CaptureManager.FrameData],
                 meshVertices: [simd_float3] = [],
                 captureDir: URL,
-                to url: URL) throws {
+                to url: URL,
+                captureStats: [String: Any] = [:]) throws {
         let workDir = captureDir
         try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
 
@@ -70,14 +71,13 @@ class FrameExporter {
                 // Constant across frames when the exposure lock held.
                 "exposure_duration": frame.exposureDuration,
                 "exposure_offset": frame.exposureOffset,
+                // 0 nominal .. 3 critical, and ms spent saving the frame.
+                "thermal_state": frame.thermalState,
+                "process_ms": (frame.processMs * 10).rounded() / 10,
             ])
         }
 
-        let metadata: [String: Any] = [
-            "frames": frameMetas,
-            "client_type": "ios_lidar",
-            "mesh_path": meshName,
-            "metadata": [
+        var summary: [String: Any] = [
                 "device_model": deviceModel(),
                 "has_lidar": true,
                 // frameMetas, not frames: a frame whose JPEG is missing from
@@ -89,7 +89,13 @@ class FrameExporter {
                     !(($0["depth_path"] as? String) ?? "").isEmpty
                 }.count,
                 "duration_seconds": round((frames.last?.timestamp ?? 0) - (frames.first?.timestamp ?? 0)),
-            ],
+        ]
+        for (key, value) in captureStats { summary[key] = value }
+        let metadata: [String: Any] = [
+            "frames": frameMetas,
+            "client_type": "ios_lidar",
+            "mesh_path": meshName,
+            "metadata": summary,
         ]
 
         let metaJSON = workDir.appendingPathComponent("metadata.json")

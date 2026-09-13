@@ -36,9 +36,12 @@ export default function LidarScanScreen({ navigation }: Props) {
   const [bytesUsed, setBytesUsed] = useState(0);
   const [storageFull, setStorageFull] = useState(false);
   const [tooFast, setTooFast] = useState(false);
+  // iOS thermal state: 0 nominal, 1 fair, 2 serious, 3 critical.
+  const [thermalState, setThermalState] = useState(0);
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<PendingUpload | null>(null);
   const storageAlerted = useRef(false);
+  const heatAlerted = useRef(false);
 
   // A scan that was captured but never reached the server -- including one
   // lost to the app being killed mid-upload -- is offered back on arrival
@@ -54,9 +57,23 @@ export default function LidarScanScreen({ navigation }: Props) {
       setBytesUsed(payload.bytesUsed ?? 0);
       if (payload.storageLimitReached) setStorageFull(true);
       setTooFast(!!payload.movingTooFast);
+      setThermalState(payload.thermalState ?? 0);
     });
     return unsubscribe;
   }, []);
+
+  // At critical the native side has stopped taking frames. Say so once, so the
+  // user finishes instead of walking on with a phone that is only getting hotter.
+  useEffect(() => {
+    if (thermalState < 3 || heatAlerted.current) return;
+    heatAlerted.current = true;
+    Alert.alert(
+      'Telefon çok ısındı',
+      'Telefonu korumak için yeni kare kaydı durduruldu. Taramayı bitirip yükle; ' +
+        'kalan yerleri telefon soğuduktan sonra ayrı bir taramada çekebilirsin.',
+      [{ text: 'Tamam' }]
+    );
+  }, [thermalState]);
 
   // Butce dolunca native taraf yeni kare kaydetmiyor. Kullaniciyi bir kez
   // uyarip taramayi bitirmeye yonlendir, yoksa bosuna gezmeye devam ediyor.
@@ -216,6 +233,10 @@ export default function LidarScanScreen({ navigation }: Props) {
                 ? "Telefonu normal aydınlık bir yere çevirip Başlat'a bas: pozlama o anda sabitlenir. Sonra odanın ortasında dur, göğüs / göz / diz hizasında birer tam tur dön; ardından duvar kenarından odanın içine bakarak yürü. Hep 1-3 m uzaktan bak, duvara yaklaşma."
                 : storageFull
                   ? 'Kayıt sınırına ulaşıldı. Durdur ve Yükle ile taramayı tamamla.'
+                  : thermalState >= 3
+                    ? 'Telefon çok ısındı, kare kaydı durdu. Durdur ve Yükle ile bitir.'
+                  : thermalState >= 2
+                    ? 'Telefon ısınıyor: kare hızı ve renk güncellemesi yavaşlatıldı. Mümkünse taramayı kısa tut.'
                   : tooFast
                     ? 'YAVAŞLA — telefon çok hızlı, kareler bulanık çıkıyor ve kaydedilmiyor.'
                     : coverageOk

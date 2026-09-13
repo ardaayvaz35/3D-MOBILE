@@ -16,6 +16,25 @@ class ArkitPreviewView: ExpoView, ARSCNViewDelegate {
     /// guncelleyebiliyor; hepsi icin SCNGeometry yeniden kurmak tarama
     /// sirasinda belirgin takilmaya yol aciyordu.
     private static let minRebuildInterval: TimeInterval = 0.4
+    // In coverage mode a rebuild is two geometries plus a colour lookup per
+    // vertex, and ARKit updates dozens of anchors a second while scanning.
+    // Rebuilding each at 0.4 s on the render thread is what made the app lag
+    // and the phone hot on half a room. Slower per anchor, slower still when
+    // iOS reports the phone as hot; what the camera looks at is refreshed
+    // separately in updateAtTime.
+    private static let coverageRebuildInterval: TimeInterval = 1.5
+    private static let hotRebuildInterval: TimeInterval = 4.0
+
+    /// Overlay geometry is built here, off SceneKit's render thread, and
+    /// installed on the main thread when ready. At most one build per anchor
+    /// is pending; a newer request for a pending anchor is dropped.
+    private let overlayQueue = DispatchQueue(label: "arkit-preview.overlay", qos: .utility)
+    private let pendingLock = NSLock()
+    private var pendingAnchors = Set<UUID>()
+
+    private static var phoneIsHot: Bool {
+        ProcessInfo.processInfo.thermalState.rawValue >= ProcessInfo.ThermalState.serious.rawValue
+    }
     private var lastRebuild: [UUID: TimeInterval] = [:]
     private var lastCoverageRefresh: TimeInterval = 0
     private var refreshCursor = 0
@@ -229,16 +248,34 @@ class ArkitPreviewView: ExpoView, ARSCNViewDelegate {
         return child
     }
 
-    /// Puts the right geometry on an anchor's node for the current mode.
-    private func apply(_ meshAnchor: ARMeshAnchor, to node: SCNNode) {
-        if ArkitSessionHost.shared.coverageActive,
-           let pair = coverageGeometries(from: meshAnchor) {
-            node.geometry = nil
-            childNode(named: Self.depthNodeName, in: node, renderingOrder: -10).geometry = pair.0
-            childNode(named: Self.colorNodeName, in: node, renderingOrder: 10).geometry = pair.1
-        } else if let wire = makeGeometry(from: meshAnchor) {
-            for child in node.childNodes { child.removeFromParentNode() }
-            node.geometry = wire
+    /// Builds the right geometry for an anchor on `overlayQueue` and installs
+    /// it on the main thread.
+    private func scheduleOverlay(for meshAnchor: ARMeshAnchor, on node: SCNNode) {
+        pendingLock.lock()
+        let alreadyPending = pendingAnchors.contains(meshAnchor.identifier)
+        if !alreadyPending { pendingAnchors.insert(meshAnchor.identifier) }
+        pendingLock.unlock()
+        if alreadyPending { return }
+
+        let coverage = ArkitSessionHost.shared.coverageActive
+        overlayQueue.async { [weak self, weak node] in
+            guard let self = self else { return }
+            let pair = coverage ? self.coverageGeometries(from: meshAnchor) : nil
+            let wire = pair == nil ? self.makeGeometry(from: meshAnchor) : nil
+            self.pendingLock.lock()
+            self.pendingAnchors.remove(meshAnchor.identifier)
+            self.pendingLock.unlock()
+            DispatchQueue.main.async {
+                guard let node = node else { return }
+                if let pair = pair {
+                    node.geometry = nil
+                    self.childNode(named: Self.depthNodeName, in: node, renderingOrder: -10).geometry = pair.0
+                    self.childNode(named: Self.colorNodeName, in: node, renderingOrder: 10).geometry = pair.1
+                } else if let wire = wire {
+                    for child in node.childNodes { child.removeFromParentNode() }
+                    node.geometry = wire
+                }
+            }
         }
     }
 
@@ -289,7 +326,7 @@ class ArkitPreviewView: ExpoView, ARSCNViewDelegate {
     func renderer(_ renderer: SCNSceneRenderer, nodeFor anchor: ARAnchor) -> SCNNode? {
         guard let meshAnchor = anchor as? ARMeshAnchor else { return nil }
         let node = SCNNode()
-        apply(meshAnchor, to: node)
+        scheduleOverlay(for: meshAnchor, on: node)
         lastRebuild[anchor.identifier] = CACurrentMediaTime()
         return node
     }
@@ -297,11 +334,13 @@ class ArkitPreviewView: ExpoView, ARSCNViewDelegate {
     func renderer(_ renderer: SCNSceneRenderer, didUpdate node: SCNNode, for anchor: ARAnchor) {
         guard let meshAnchor = anchor as? ARMeshAnchor else { return }
         let now = CACurrentMediaTime()
-        if let last = lastRebuild[anchor.identifier], now - last < Self.minRebuildInterval {
+        let interval = !ArkitSessionHost.shared.coverageActive ? Self.minRebuildInterval
+            : (Self.phoneIsHot ? Self.hotRebuildInterval : Self.coverageRebuildInterval)
+        if let last = lastRebuild[anchor.identifier], now - last < interval {
             return
         }
         lastRebuild[anchor.identifier] = now
-        apply(meshAnchor, to: node)
+        scheduleOverlay(for: meshAnchor, on: node)
     }
 
     /// Mesh anchors only report updates while ARKit is still refining them,
@@ -311,14 +350,16 @@ class ArkitPreviewView: ExpoView, ARSCNViewDelegate {
     /// at, which read as "it never turns yellow". Now every tick recolours the
     /// anchors nearest to the point 1.5 m in front of the camera -- what is on
     /// screen -- plus a couple of others round-robin so nothing stays stale.
-    private static let coverageRefreshInterval: TimeInterval = 0.25
-    private static let nearestPerRefresh = 3
-    private static let roundRobinPerRefresh = 2
+    private static let coverageRefreshInterval: TimeInterval = 0.5
+    private static let hotRefreshInterval: TimeInterval = 2.0
+    private static let nearestPerRefresh = 2
+    private static let roundRobinPerRefresh = 1
     private static let lookAheadMeters: Float = 1.5
 
     func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
+        let refreshInterval = Self.phoneIsHot ? Self.hotRefreshInterval : Self.coverageRefreshInterval
         guard ArkitSessionHost.shared.coverageActive,
-              time - lastCoverageRefresh >= Self.coverageRefreshInterval else { return }
+              time - lastCoverageRefresh >= refreshInterval else { return }
         lastCoverageRefresh = time
         let anchors = ArkitSessionHost.shared.currentMeshAnchors()
         guard !anchors.isEmpty else { return }
@@ -344,7 +385,8 @@ class ArkitPreviewView: ExpoView, ARSCNViewDelegate {
 
         for anchor in chosen {
             guard let node = sceneView.node(for: anchor) else { continue }
-            apply(anchor, to: node)
+            lastRebuild[anchor.identifier] = CACurrentMediaTime()
+            scheduleOverlay(for: anchor, on: node)
         }
     }
 
@@ -356,4 +398,7 @@ class ArkitPreviewView: ExpoView, ARSCNViewDelegate {
     func renderer(_ renderer: SCNSceneRenderer, didRemove node: SCNNode, for anchor: ARAnchor) {
         lastRebuild.removeValue(forKey: anchor.identifier)
     }
+
+    // lastRebuild is touched from nodeFor/didUpdate/updateAtTime, which
+    // SceneKit calls on its render thread; overlay builds never touch it.
 }

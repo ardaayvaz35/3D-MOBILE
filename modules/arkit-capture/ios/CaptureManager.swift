@@ -42,6 +42,11 @@ class CaptureManager {
         // worked instead of trusting that it was requested.
         let exposureDuration: Double
         let exposureOffset: Float
+        // ProcessInfo.ThermalState raw value (0 nominal .. 3 critical) when the
+        // frame was taken, and how long saving it took. Recorded so the next
+        // "the phone got hot" report is a measurement, not a guess.
+        let thermalState: Int
+        let processMs: Double
     }
 
     struct ExportResult {
@@ -70,6 +75,12 @@ class CaptureManager {
     // fix is to SELECT a sharp frame every window, never to skip a window:
     // at 4 fps a 5-minute room is ~1200 frames.
     private static let frameInterval: TimeInterval = 0.25
+    // Heat. iOS reports .serious before it starts throttling the SoC and
+    // .critical just before it would kill a hot app. At .serious the cadence
+    // halves; at .critical no more frames are taken and the screen tells the
+    // user to finish. A phone that got "hot as fire" on half a room was running
+    // at full rate the whole time.
+    private static let hotFrameInterval: TimeInterval = 0.5
     // Novelty: only skip frames when the phone is genuinely parked. The old
     // 8 cm / 10 deg rule was sized for a 34 MB budget that no longer exists
     // and at a careful 0.1 m/s walk it alone stretched spacing to ~0.8 s.
@@ -102,6 +113,23 @@ class CaptureManager {
     private var blurStreak = 0
     private(set) var skippedBlurred = 0
     private(set) var skippedRedundant = 0
+    private(set) var skippedBusy = 0
+    private var maxThermalState = 0
+
+    // Saving a frame (JPEG encode of a 1920x1440 image, depth and confidence
+    // files, coverage update) used to run inside the ARSession delegate, i.e.
+    // on the MAIN thread, four times a second. That froze the UI and made
+    // ARKit wait for its frames back -- the lag and much of the heat. Saving
+    // now runs on this serial queue, one frame at a time: if the previous
+    // frame is still being written, the new one is skipped instead of queued,
+    // so a phone that slows down under heat takes fewer frames rather than
+    // piling up memory.
+    private let workQueue = DispatchQueue(label: "arkit-capture.frames", qos: .userInitiated)
+    // Guards everything the work queue and the delegate thread both touch:
+    // frames, frameCount, imageBytesUsed, budgetReached, workInFlight.
+    private let stateLock = NSLock()
+    private var workInFlight = false
+    private var nextIndex = 0
 
     // Arsiv Cloudflare R2'ye yuklendigi icin nesne basina pratik bir sinir yok
     // (tek PUT ile 5 GB). Onceki 34 MB butcesi Supabase'in 50 MB nesne
@@ -123,29 +151,36 @@ class CaptureManager {
     // gozle gorulur takilmaya yol aciyordu.
     private lazy var ciContext = CIContext()
 
-    /// (frameCount, angleCoveragePct 0..1, kullanilanBayt, butceDoldu, cokHizli)
-    private let onFrame: (Int, Double, Int, Bool, Bool) -> Void
+    /// (frameCount, angleCoveragePct 0..1, kullanilanBayt, butceDoldu, cokHizli, isiDurumu 0..3)
+    private let onFrame: (Int, Double, Int, Bool, Bool, Int) -> Void
     private(set) var isRecording = false
     private var frameCount = 0
     private var frames: [FrameData] = []
     private var recordingStart: Date?
     private var visitedSectors = Set<Int>()
 
-    init(onFrame: @escaping (Int, Double, Int, Bool, Bool) -> Void) {
+    init(onFrame: @escaping (Int, Double, Int, Bool, Bool, Int) -> Void) {
         self.onFrame = onFrame
     }
 
     /// Yukleme butcesinin ne kadari kullanildi (0..1).
     var byteBudgetFraction: Double {
-        min(1.0, Double(imageBytesUsed) / Double(Self.imageByteBudget))
+        stateLock.lock(); defer { stateLock.unlock() }
+        return min(1.0, Double(imageBytesUsed) / Double(Self.imageByteBudget))
     }
 
     func startRecording() {
+        stateLock.lock()
         frames.removeAll()
         frameCount = 0
-        lastCaptureTime = 0
         imageBytesUsed = 0
         budgetReached = false
+        workInFlight = false
+        stateLock.unlock()
+        lastCaptureTime = 0
+        nextIndex = 0
+        skippedBusy = 0
+        maxThermalState = 0
         visitedSectors.removeAll()
         lastKeptTransform = nil
         previousTransform = nil
@@ -172,6 +207,13 @@ class CaptureManager {
 
     func stopRecordingAndExport() throws -> ExportResult {
         isRecording = false
+        // Let the frame being written finish, so it is in the archive and its
+        // files are not zipped half-written.
+        workQueue.sync {}
+        stateLock.lock()
+        let savedFrames = frames
+        let bytesUsed = imageBytesUsed
+        stateLock.unlock()
         ArkitSessionHost.shared.unlockExposureAndWhiteBalance()
         ArkitSessionHost.shared.coverageActive = false
 
@@ -205,17 +247,24 @@ class CaptureManager {
         let exportURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("scan_\(UUID().uuidString.prefix(8)).zip")
 
-        print("[capture] exporting \(frames.count) frames "
-              + "(\(imageBytesUsed / 1_048_576) MB; skipped \(skippedBlurred) blurred, "
-              + "\(skippedRedundant) redundant)")
+        print("[capture] exporting \(savedFrames.count) frames "
+              + "(\(bytesUsed / 1_048_576) MB; skipped \(skippedBlurred) blurred, "
+              + "\(skippedRedundant) redundant, \(skippedBusy) busy; "
+              + "max thermal state \(maxThermalState))")
 
         let exporter = FrameExporter()
-        try exporter.export(frames: frames, meshVertices: meshVertices,
-                            captureDir: tempDir, to: exportURL)
+        try exporter.export(frames: savedFrames, meshVertices: meshVertices,
+                            captureDir: tempDir, to: exportURL,
+                            captureStats: [
+                                "skipped_blurred": skippedBlurred,
+                                "skipped_redundant": skippedRedundant,
+                                "skipped_busy": skippedBusy,
+                                "thermal_state_max": maxThermalState,
+                            ])
 
         return ExportResult(
             archivePath: exportURL.path,
-            frameCount: frames.count,
+            frameCount: savedFrames.count,
             durationSeconds: duration
         )
     }
@@ -228,25 +277,12 @@ class CaptureManager {
         guard isRecording else { return }
 
         // Require an active LiDAR depth frame: it is the cheapest available
-        // proof that tracking is healthy this instant, and from here on it is
-        // also data we keep.
-        //
-        // Per-frame depth used to be dropped because it roughly doubled the
-        // archive against a hard 50 MB per-object upload cap. The archive
-        // moved to R2, so that cap is gone and the depth is worth far more
-        // than its ~150 KB a frame: it builds a seed cloud that is both much
-        // denser than ARKit's fused mesh and colored from the RGB frame, where
-        // the mesh carried no color at all.
-        guard frame.sceneDepth != nil else {
+        // proof that tracking is healthy this instant, and it is data we keep
+        // (seed cloud and depth supervision on the server). Only the smoothed
+        // map is requested from ARKit; it flickers far less between frames.
+        guard let depthFrame = frame.smoothedSceneDepth ?? frame.sceneDepth else {
             return
         }
-
-        // Prefer the temporally smoothed map where ARKit offers it. Both are
-        // requested in the session's frameSemantics; the smoothed one flickers
-        // far less between frames, which matters because every frame's points
-        // are merged into one cloud and per-frame noise does not average out,
-        // it accumulates as fog.
-        let depthFrame = frame.smoothedSceneDepth ?? frame.sceneDepth
 
         let pose = frame.camera.transform
 
@@ -265,27 +301,36 @@ class CaptureManager {
         previousTransform = pose
         previousTimestamp = frame.timestamp
 
-        // Angle-coverage tracking updates on every skip path too, so the UI
-        // progress stays responsive whatever we decide about this frame.
+        let thermal = ProcessInfo.processInfo.thermalState.rawValue
+        maxThermalState = max(maxThermalState, thermal)
+        let (savedCount, bytesUsed, budgetFull) = snapshot()
+
+        if thermal >= ProcessInfo.ThermalState.critical.rawValue {
+            registerAngleCoverage(transform: pose)
+            onFrame(savedCount, angleCoveragePct, bytesUsed, budgetFull, false, thermal)
+            return
+        }
+        let interval = thermal >= ProcessInfo.ThermalState.serious.rawValue
+            ? Self.hotFrameInterval : Self.frameInterval
+
         let sinceKept = frame.timestamp - lastCaptureTime
-        if sinceKept < Self.frameInterval {
+        if sinceKept < interval {
             registerAngleCoverage(transform: pose)
             return
         }
 
         // Butce dolduysa yeni kare biriktirme, ama aci takibi ve olaylar aksin
         // ki kullanici taramayi bitirmesi gerektigini ekranda gorsun.
-        if budgetReached {
+        if budgetFull {
             registerAngleCoverage(transform: pose)
-            onFrame(frameCount, angleCoveragePct, imageBytesUsed, true, false)
+            onFrame(savedCount, angleCoveragePct, bytesUsed, true, false, thermal)
             return
         }
 
         // Blur gate: a smeared frame actively hurts -- the optimiser fits the
         // smear. Skipping costs nothing because the user is still moving and a
         // sharp frame of the same view arrives a moment later. The streak
-        // drives the on-screen "slow down" so a user sweeping too fast learns
-        // it now, not when the tour comes back streaky.
+        // drives the on-screen "slow down".
         let exposure = Float(frame.camera.exposureDuration)
         let focalPx = frame.camera.intrinsics[0][0]
         let smearPx = (angularSpeed + linearSpeed / Self.nominalDepthMeters) * exposure * focalPx
@@ -296,15 +341,14 @@ class CaptureManager {
             blurStreak += 1
             registerAngleCoverage(transform: pose)
             if blurStreak >= Self.tooFastAfterSkips {
-                onFrame(frameCount, angleCoveragePct, imageBytesUsed, false, true)
+                onFrame(savedCount, angleCoveragePct, bytesUsed, false, true, thermal)
             }
             return
         }
         blurStreak = 0
 
-        // Novelty gate: measured against the last frame we KEPT, not the last
-        // frame seen, so holding the phone still consumes no budget at all.
-        // The first frame has no reference and is always kept.
+        // Novelty gate: measured against the last frame we KEPT, so holding
+        // the phone still consumes nothing. The first frame is always kept.
         if let kept = lastKeptTransform {
             let moved = simd_distance(Self.translation(kept), Self.translation(pose))
             let turned = Self.angleBetween(kept, pose)
@@ -312,19 +356,60 @@ class CaptureManager {
                 skippedRedundant += 1
                 registerAngleCoverage(transform: pose)
                 // Holding still after a fast sweep must clear the warning.
-                onFrame(frameCount, angleCoveragePct, imageBytesUsed, false, false)
+                onFrame(savedCount, angleCoveragePct, bytesUsed, false, false, thermal)
                 return
             }
         }
 
+        // One frame on the work queue at a time; see `workQueue`.
+        guard tryBeginWork() else {
+            skippedBusy += 1
+            registerAngleCoverage(transform: pose)
+            return
+        }
+
+        let index = nextIndex
+        nextIndex += 1
+        lastKeptTransform = pose
+        lastCaptureTime = frame.timestamp
+        registerAngleCoverage(transform: pose)
+        let coverageNow = angleCoveragePct
+
+        // Only values and pixel buffers cross to the work queue, never the
+        // ARFrame itself: ARKit recycles frames and starts dropping them when
+        // the app holds on to them.
+        let pixelBuffer = frame.capturedImage
+        let depthMap = depthFrame.depthMap
+        let confidenceMap = depthFrame.confidenceMap
+        let intrinsics = frame.camera.intrinsics
+        let imageResolution = frame.camera.imageResolution
         let timestamp = frame.timestamp
-        let index = frameCount
+        let exposureDuration = frame.camera.exposureDuration
+        let exposureOffset = frame.camera.exposureOffset
 
-        let rgbImage = CIImage(cvPixelBuffer: frame.capturedImage)
+        workQueue.async { [weak self] in
+            guard let self = self else { return }
+            defer { self.endWork() }
+            self.writeFrame(index: index, pixelBuffer: pixelBuffer, depthMap: depthMap,
+                            confidenceMap: confidenceMap, fullIntrinsics: intrinsics,
+                            imageResolution: imageResolution, pose: pose,
+                            timestamp: timestamp, exposureDuration: exposureDuration,
+                            exposureOffset: exposureOffset, thermalState: thermal,
+                            coverage: coverageNow)
+        }
+    }
 
-        // Uzun kenari hedefe indir. targetLongEdge artik ARKit'in kendi
-        // cozunurlugu (1920) oldugu icin bu pratikte kopya gecmiyor; kanca,
-        // ileride farkli bir cihaz daha buyuk kare verirse diye duruyor.
+    /// Runs on `workQueue`. Encodes and writes one frame, then reports it.
+    private func writeFrame(index: Int, pixelBuffer: CVPixelBuffer, depthMap: CVPixelBuffer,
+                            confidenceMap: CVPixelBuffer?, fullIntrinsics: simd_float3x3,
+                            imageResolution: CGSize, pose: simd_float4x4,
+                            timestamp: TimeInterval, exposureDuration: Double,
+                            exposureOffset: Float, thermalState: Int, coverage: Double) {
+        let started = CACurrentMediaTime()
+        let rgbImage = CIImage(cvPixelBuffer: pixelBuffer)
+
+        // Uzun kenari hedefe indir. targetLongEdge ARKit'in kendi cozunurlugu
+        // (1920) oldugu icin bu pratikte kopya gecmiyor.
         let extent = rgbImage.extent
         let longEdge = max(extent.width, extent.height)
         let scale = longEdge > Self.targetLongEdge ? Self.targetLongEdge / longEdge : 1.0
@@ -342,10 +427,14 @@ class CaptureManager {
             return
         }
 
-        if imageBytesUsed + jpeg.count > Self.imageByteBudget {
-            budgetReached = true
-            registerAngleCoverage(transform: frame.camera.transform)
-            onFrame(frameCount, angleCoveragePct, imageBytesUsed, true, false)
+        stateLock.lock()
+        let overBudget = imageBytesUsed + jpeg.count > Self.imageByteBudget
+        if overBudget { budgetReached = true }
+        let countBefore = frameCount
+        let bytesBefore = imageBytesUsed
+        stateLock.unlock()
+        if overBudget {
+            onFrame(countBefore, coverage, bytesBefore, true, false, thermalState)
             return
         }
 
@@ -357,19 +446,11 @@ class CaptureManager {
         } catch {
             return
         }
-        imageBytesUsed += jpeg.count
-        frameCount += 1
-        // Only advance the novelty reference and the cadence clock once the
-        // frame is actually on disk; a failed write above must not make the
-        // next frame look redundant against a view we never stored.
-        lastKeptTransform = pose
-        lastCaptureTime = frame.timestamp
-
-        let transform = pose
+        var bytesWritten = jpeg.count
 
         // Goruntu kuculunce ic parametreler de ayni oranda kuculmeli, yoksa
         // poz ile goruntu birbirini tutmaz ve rekonstruksiyon bozulur.
-        var intrinsics = frame.camera.intrinsics
+        var intrinsics = fullIntrinsics
         if scale < 1.0 {
             let s = Float(scale)
             intrinsics[0, 0] *= s
@@ -378,41 +459,46 @@ class CaptureManager {
             intrinsics[2, 1] *= s
         }
 
-        // Depth and confidence, written next to the JPEG under the same
-        // index so the export step can pair them up by name.
+        // Depth and confidence, written next to the JPEG under the same index
+        // so the export step can pair them up by name. A file is only claimed
+        // in the metadata if it landed at its expected size: a half-written
+        // buffer must not be advertised, or the worker reshapes garbage.
         var depthPath = ""
         var confidencePath = ""
-        var depthWidth = 0
-        var depthHeight = 0
-        if let depthFrame = depthFrame {
-            let map = depthFrame.depthMap
-            depthWidth = CVPixelBufferGetWidth(map)
-            depthHeight = CVPixelBufferGetHeight(map)
-
-            let dPath = tempDir.appendingPathComponent(
-                "depth_\(String(format: "%06d", index)).bin").path
-            saveDepth16(map, to: dPath)
-            // Only claim the file if it actually landed: a half-written or
-            // missing buffer must not be advertised in the metadata, or the
-            // worker reshapes garbage into geometry.
-            if let size = try? FileManager.default.attributesOfItem(atPath: dPath)[.size] as? Int,
-               size == depthWidth * depthHeight * 2 {
-                depthPath = dPath
-                imageBytesUsed += size
-            }
-
-            if let conf = depthFrame.confidenceMap {
-                let cPath = tempDir.appendingPathComponent(
-                    "conf_\(String(format: "%06d", index)).bin").path
-                saveConfidence(conf, to: cPath)
-                if let size = try? FileManager.default.attributesOfItem(atPath: cPath)[.size] as? Int,
-                   size == CVPixelBufferGetWidth(conf) * CVPixelBufferGetHeight(conf) {
-                    confidencePath = cPath
-                    imageBytesUsed += size
-                }
+        let depthWidth = CVPixelBufferGetWidth(depthMap)
+        let depthHeight = CVPixelBufferGetHeight(depthMap)
+        let dPath = tempDir.appendingPathComponent(
+            "depth_\(String(format: "%06d", index)).bin").path
+        saveDepth16(depthMap, to: dPath)
+        if let size = try? FileManager.default.attributesOfItem(atPath: dPath)[.size] as? Int,
+           size == depthWidth * depthHeight * 2 {
+            depthPath = dPath
+            bytesWritten += size
+        }
+        if let conf = confidenceMap {
+            let cPath = tempDir.appendingPathComponent(
+                "conf_\(String(format: "%06d", index)).bin").path
+            saveConfidence(conf, to: cPath)
+            if let size = try? FileManager.default.attributesOfItem(atPath: cPath)[.size] as? Int,
+               size == CVPixelBufferGetWidth(conf) * CVPixelBufferGetHeight(conf) {
+                confidencePath = cPath
+                bytesWritten += size
             }
         }
 
+        // Only KEPT frames count: coverage means "the server will have this".
+        ArkitSessionHost.shared.coverage.integrate(
+            depthMap: depthMap,
+            confidenceMap: confidenceMap,
+            intrinsics: fullIntrinsics,
+            imageResolution: imageResolution,
+            cameraTransform: pose
+        )
+
+        let processMs = (CACurrentMediaTime() - started) * 1000
+        stateLock.lock()
+        imageBytesUsed += bytesWritten
+        frameCount += 1
         frames.append(FrameData(
             index: index,
             timestamp: timestamp,
@@ -420,27 +506,40 @@ class CaptureManager {
             depthPath: depthPath,
             confidencePath: confidencePath,
             intrinsics: intrinsics,
-            transform: transform,
+            transform: pose,
             imageWidth: outWidth,
             imageHeight: outHeight,
             depthWidth: depthWidth,
             depthHeight: depthHeight,
-            exposureDuration: frame.camera.exposureDuration,
-            exposureOffset: frame.camera.exposureOffset
+            exposureDuration: exposureDuration,
+            exposureOffset: exposureOffset,
+            thermalState: thermalState,
+            processMs: processMs
         ))
+        let countNow = frameCount
+        let bytesNow = imageBytesUsed
+        stateLock.unlock()
 
-        registerAngleCoverage(transform: transform)
-        // Only KEPT frames count: coverage means "the server will have this".
-        if let depthFrame = depthFrame {
-            ArkitSessionHost.shared.coverage.integrate(
-                depthMap: depthFrame.depthMap,
-                confidenceMap: depthFrame.confidenceMap,
-                intrinsics: frame.camera.intrinsics,
-                imageResolution: frame.camera.imageResolution,
-                cameraTransform: pose
-            )
-        }
-        onFrame(frameCount, angleCoveragePct, imageBytesUsed, false, false)
+        onFrame(countNow, coverage, bytesNow, false, false, thermalState)
+    }
+
+    private func tryBeginWork() -> Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        if workInFlight { return false }
+        workInFlight = true
+        return true
+    }
+
+    private func endWork() {
+        stateLock.lock()
+        workInFlight = false
+        stateLock.unlock()
+    }
+
+    /// (saved frames, bytes used, budget full), read consistently.
+    private func snapshot() -> (Int, Int, Bool) {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return (frameCount, imageBytesUsed, budgetReached)
     }
 
     private var angleCoveragePct: Double {

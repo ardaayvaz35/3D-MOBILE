@@ -66,27 +66,48 @@ const SUPABASE_OBJECT_LIMIT_BYTES = 48 * 1024 * 1024;
 /// upload URL. The R2 key is minted server-side (the client must not name its
 /// own path -- `submit-capture` authorises a capture by checking the path is
 /// under the caller's own user id).
+// A request that never left the phone ("Failed to send a request to the Edge
+// Function"): the network blinked, not the server. Seen on a hot phone at the
+// end of a scan while the function itself answered instantly.
+function isNetworkFailure(err: unknown): boolean {
+  const e = err as any;
+  const text = `${e?.name ?? ''} ${e?.message ?? ''}`;
+  return /FunctionsFetchError|Failed to send a request|Network request failed/i.test(text);
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 async function resolveUploadTarget(ext: string, mimeType: string): Promise<UploadTarget> {
   let reason = 'bilinmeyen';
-  try {
-    const { data, error } = await supabase.functions.invoke('create-upload-url', {
-      body: { ext, content_type: mimeType },
-    });
-    if (!error && data?.upload_url && data?.storage_path) {
-      return { backend: 'r2', uploadUrl: data.upload_url, storagePath: data.storage_path };
+  // Only this call is retried. It merely presigns a URL, so repeating it is
+  // harmless; submit-capture charges credits and starts the GPU, and must never
+  // be retried blindly.
+  const delaysMs = [0, 2000, 5000];
+  for (let attempt = 0; attempt < delaysMs.length; attempt++) {
+    if (delaysMs[attempt]) await sleep(delaysMs[attempt]);
+    try {
+      const { data, error } = await supabase.functions.invoke('create-upload-url', {
+        body: { ext, content_type: mimeType },
+      });
+      if (!error && data?.upload_url && data?.storage_path) {
+        return { backend: 'r2', uploadUrl: data.upload_url, storagePath: data.storage_path };
+      }
+      // 501 r2_not_configured is expected until the bucket credentials are set;
+      // anything else still falls back, but the reason has to survive to the
+      // error the user actually sees.
+      reason =
+        (error as any)?.context?.error ??
+        error?.message ??
+        (data ? 'sunucu presigned URL döndürmedi' : 'yanıt boş');
+      console.log(`[upload] create-upload-url attempt ${attempt + 1} failed:`, reason);
+      if (!isNetworkFailure(error)) break;
+    } catch (e: any) {
+      reason = e?.message ?? String(e);
+      console.log(`[upload] create-upload-url attempt ${attempt + 1} threw:`, reason);
+      if (!isNetworkFailure(e)) break;
     }
-    // 501 r2_not_configured is expected until the bucket credentials are set;
-    // anything else still falls back, but the reason has to survive to the
-    // error the user actually sees.
-    reason =
-      (error as any)?.context?.error ??
-      error?.message ??
-      (data ? 'sunucu presigned URL döndürmedi' : 'yanıt boş');
-    console.log('[upload] R2 unavailable, using Supabase Storage:', reason);
-  } catch (e: any) {
-    reason = e?.message ?? String(e);
-    console.log('[upload] create-upload-url threw, using Supabase Storage:', reason);
   }
+  console.log('[upload] R2 unavailable, using Supabase Storage:', reason);
 
   const userId = await requireUserId();
   const folder = `${userId}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
