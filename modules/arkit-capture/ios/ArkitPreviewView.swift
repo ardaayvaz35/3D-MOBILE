@@ -80,10 +80,40 @@ class ArkitPreviewView: ExpoView, ARSCNViewDelegate {
         return m
     }()
 
-    /// Kapsama isi haritasi materyali: renk vertex basina CoverageMap'ten
-    /// geliyor, bu yuzden diffuse beyaz ve emisyon yok. Tel kafes yerine dolu
-    /// yuzey: 1 px cizgilerde renk okunmuyordu ve ag "cok saydam" gorunuyordu;
-    /// yari saydamlik vertex alfasindan (0.5) geliyor.
+    // MARK: - Kapsama isi haritasi: tek katman
+    //
+    // Yari saydam dolu yuzey tek geciste cizilince, kameraya bakan yuzeyin
+    // arkasindaki her yuzey (masanin alt yuzu, bacaklar, sandalye, ust uste
+    // binen komsu mesh anchor'lari) onun ALTINDA harmanlanip gorunuyordu:
+    // bir masa "20 kat" gibi duruyor ve rengi okunmuyordu. SceneKit saydam
+    // ucgenleri tek tek siralamaz, bu yuzden derinlik yazmak da yetmedi.
+    //
+    // Cozum iki gecis:
+    //   1. derinlik gecisi: ayni mesh, renk yazmadan, sadece derinlik yazar;
+    //      her pikselde en yakin yuzeyin derinligi kalir;
+    //   2. renk gecisi: vertex'ler normal yonunde 1 cm kaldirilmis kopya,
+    //      derinlik testiyle. Sadece en yakin yuzeyin kaldirilmis hali
+    //      testi gecer; arkadakiler gecemez. Renk gecisi de derinlik yazar,
+    //      boylece cakisan iki anchor ayni pikselde iki kez boyanmaz.
+    // Kaydirma CPU'da yapiliyor (shader degil), cunku shader derleme hatasi
+    // ancak cihazda gorulur; bu yol derleyicinin kontrol ettigi Swift.
+
+    private static let depthNodeName = "coverage-depth"
+    private static let colorNodeName = "coverage-color"
+    private static let colorLiftMeters: Float = 0.01
+
+    private static let coverageDepthMaterial: SCNMaterial = {
+        let m = SCNMaterial()
+        m.colorBufferWriteMask = []
+        m.isDoubleSided = true
+        m.lightingModel = .constant
+        m.readsFromDepthBuffer = true
+        m.writesToDepthBuffer = true
+        return m
+    }()
+
+    /// Renk vertex basina CoverageMap'ten geliyor, bu yuzden diffuse beyaz ve
+    /// emisyon yok; yari saydamlik vertex alfasindan geliyor.
     private static let coverageMaterial: SCNMaterial = {
         let m = SCNMaterial()
         m.diffuse.contents = UIColor.white
@@ -97,7 +127,122 @@ class ArkitPreviewView: ExpoView, ARSCNViewDelegate {
         return m
     }()
 
-    /// ARMeshGeometry'yi cizilebilir bir SCNGeometry'ye cevirir.
+    /// Kapsama modu icin (derinlik, renk) geometri cifti.
+    private func coverageGeometries(from meshAnchor: ARMeshAnchor) -> (SCNGeometry, SCNGeometry)? {
+        let meshGeometry = meshAnchor.geometry
+        let vertices = meshGeometry.vertices
+        let normals = meshGeometry.normals
+        let faces = meshGeometry.faces
+        let count = vertices.count
+        guard count > 0, faces.count > 0, normals.count == count else { return nil }
+
+        let vertexBytes = vertices.offset + count * vertices.stride
+        let normalBytes = normals.offset + count * normals.stride
+        let indexBytes = faces.count * faces.indexCountPerPrimitive * faces.bytesPerIndex
+        guard vertexBytes <= vertices.buffer.length,
+              normalBytes <= normals.buffer.length,
+              indexBytes <= faces.buffer.length else { return nil }
+        // Copies: ARKit reuses and overwrites its buffers.
+        let vertexData = Data(bytes: vertices.buffer.contents(), count: vertexBytes)
+        let normalData = Data(bytes: normals.buffer.contents(), count: normalBytes)
+        let indexData = Data(bytes: faces.buffer.contents(), count: indexBytes)
+
+        var lifted = [Float](repeating: 0, count: count * 3)
+        vertexData.withUnsafeBytes { (v: UnsafeRawBufferPointer) in
+            normalData.withUnsafeBytes { (n: UnsafeRawBufferPointer) in
+                for i in 0..<count {
+                    let vo = vertices.offset + i * vertices.stride
+                    let no = normals.offset + i * normals.stride
+                    for k in 0..<3 {
+                        lifted[i * 3 + k] =
+                            v.loadUnaligned(fromByteOffset: vo + k * 4, as: Float.self)
+                            + n.loadUnaligned(fromByteOffset: no + k * 4, as: Float.self)
+                            * Self.colorLiftMeters
+                    }
+                }
+            }
+        }
+        let liftedData = lifted.withUnsafeBufferPointer { Data(buffer: $0) }
+
+        let element = SCNGeometryElement(
+            data: indexData,
+            primitiveType: .triangles,
+            primitiveCount: faces.count,
+            bytesPerIndex: faces.bytesPerIndex
+        )
+
+        let depthSource = SCNGeometrySource(
+            data: vertexData,
+            semantic: .vertex,
+            vectorCount: count,
+            usesFloatComponents: true,
+            componentsPerVector: 3,
+            bytesPerComponent: MemoryLayout<Float>.size,
+            dataOffset: vertices.offset,
+            dataStride: vertices.stride
+        )
+        let depthGeometry = SCNGeometry(sources: [depthSource], elements: [element])
+        depthGeometry.materials = [Self.coverageDepthMaterial]
+
+        let liftedSource = SCNGeometrySource(
+            data: liftedData,
+            semantic: .vertex,
+            vectorCount: count,
+            usesFloatComponents: true,
+            componentsPerVector: 3,
+            bytesPerComponent: MemoryLayout<Float>.size,
+            dataOffset: 0,
+            dataStride: 3 * MemoryLayout<Float>.size
+        )
+        // Colours from the real surface position, not the lifted one.
+        let colors = ArkitSessionHost.shared.coverage.vertexColors(
+            vertexData: vertexData,
+            offset: vertices.offset,
+            stride: vertices.stride,
+            count: count,
+            anchorTransform: meshAnchor.transform
+        )
+        let colorSource = SCNGeometrySource(
+            data: colors,
+            semantic: .color,
+            vectorCount: count,
+            usesFloatComponents: true,
+            componentsPerVector: 4,
+            bytesPerComponent: MemoryLayout<Float>.size,
+            dataOffset: 0,
+            dataStride: 4 * MemoryLayout<Float>.size
+        )
+        let colorGeometry = SCNGeometry(sources: [liftedSource, colorSource], elements: [element])
+        colorGeometry.materials = [Self.coverageMaterial]
+        return (depthGeometry, colorGeometry)
+    }
+
+    private func childNode(named name: String, in node: SCNNode, renderingOrder: Int) -> SCNNode {
+        if let existing = node.childNode(withName: name, recursively: false) {
+            return existing
+        }
+        let child = SCNNode()
+        child.name = name
+        // Every depth pass must be drawn before every colour pass.
+        child.renderingOrder = renderingOrder
+        node.addChildNode(child)
+        return child
+    }
+
+    /// Puts the right geometry on an anchor's node for the current mode.
+    private func apply(_ meshAnchor: ARMeshAnchor, to node: SCNNode) {
+        if ArkitSessionHost.shared.coverageActive,
+           let pair = coverageGeometries(from: meshAnchor) {
+            node.geometry = nil
+            childNode(named: Self.depthNodeName, in: node, renderingOrder: -10).geometry = pair.0
+            childNode(named: Self.colorNodeName, in: node, renderingOrder: 10).geometry = pair.1
+        } else if let wire = makeGeometry(from: meshAnchor) {
+            for child in node.childNodes { child.removeFromParentNode() }
+            node.geometry = wire
+        }
+    }
+
+    /// Tarama oncesi tel kafes: ARMeshGeometry'yi cizilebilir bir SCNGeometry'ye cevirir.
     ///
     /// Onemli: ARKit'in MTLBuffer'lari yeniden kullanilip uzerine yaziliyor.
     /// Onceki surum `bytesNoCopy` ile bu bellege dogrudan bakiyordu, bu yuzden
@@ -136,36 +281,15 @@ class ArkitPreviewView: ExpoView, ARSCNViewDelegate {
             bytesPerIndex: faces.bytesPerIndex
         )
 
-        var sources = [source]
-        if ArkitSessionHost.shared.coverageActive {
-            let colors = ArkitSessionHost.shared.coverage.vertexColors(
-                vertexData: vertexData,
-                offset: vertices.offset,
-                stride: vertices.stride,
-                count: vertices.count,
-                anchorTransform: meshAnchor.transform
-            )
-            sources.append(SCNGeometrySource(
-                data: colors,
-                semantic: .color,
-                vectorCount: vertices.count,
-                usesFloatComponents: true,
-                componentsPerVector: 4,
-                bytesPerComponent: MemoryLayout<Float>.size,
-                dataOffset: 0,
-                dataStride: 4 * MemoryLayout<Float>.size
-            ))
-        }
-
-        let geometry = SCNGeometry(sources: sources, elements: [element])
-        geometry.materials = [sources.count > 1 ? Self.coverageMaterial : Self.scanMaterial]
+        let geometry = SCNGeometry(sources: [source], elements: [element])
+        geometry.materials = [Self.scanMaterial]
         return geometry
     }
 
     func renderer(_ renderer: SCNSceneRenderer, nodeFor anchor: ARAnchor) -> SCNNode? {
         guard let meshAnchor = anchor as? ARMeshAnchor else { return nil }
         let node = SCNNode()
-        node.geometry = makeGeometry(from: meshAnchor)
+        apply(meshAnchor, to: node)
         lastRebuild[anchor.identifier] = CACurrentMediaTime()
         return node
     }
@@ -177,17 +301,20 @@ class ArkitPreviewView: ExpoView, ARSCNViewDelegate {
             return
         }
         lastRebuild[anchor.identifier] = now
-        if let geometry = makeGeometry(from: meshAnchor) {
-            node.geometry = geometry
-        }
+        apply(meshAnchor, to: node)
     }
 
     /// Mesh anchors only report updates while ARKit is still refining them,
-    /// so a wall meshed early would keep its first colour however long it was
-    /// scanned afterwards. Recolour a few anchors per tick, round-robin, so the
-    /// map keeps up without rebuilding every anchor on the render thread.
-    private static let coverageRefreshInterval: TimeInterval = 0.5
-    private static let anchorsPerRefresh = 6
+    /// so a surface meshed early would keep its first colour however long it
+    /// was filmed afterwards. The old round-robin (6 anchors every 0.5 s)
+    /// took several seconds to come back to the surface the user was looking
+    /// at, which read as "it never turns yellow". Now every tick recolours the
+    /// anchors nearest to the point 1.5 m in front of the camera -- what is on
+    /// screen -- plus a couple of others round-robin so nothing stays stale.
+    private static let coverageRefreshInterval: TimeInterval = 0.25
+    private static let nearestPerRefresh = 3
+    private static let roundRobinPerRefresh = 2
+    private static let lookAheadMeters: Float = 1.5
 
     func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
         guard ArkitSessionHost.shared.coverageActive,
@@ -195,13 +322,35 @@ class ArkitPreviewView: ExpoView, ARSCNViewDelegate {
         lastCoverageRefresh = time
         let anchors = ArkitSessionHost.shared.currentMeshAnchors()
         guard !anchors.isEmpty else { return }
-        for k in 0..<min(Self.anchorsPerRefresh, anchors.count) {
-            let anchor = anchors[(refreshCursor + k) % anchors.count]
-            guard let node = sceneView.node(for: anchor),
-                  let geometry = makeGeometry(from: anchor) else { continue }
-            node.geometry = geometry
+
+        var chosen: [ARMeshAnchor] = []
+        if let camera = sceneView.session.currentFrame?.camera.transform {
+            let position = simd_float3(camera.columns.3.x, camera.columns.3.y, camera.columns.3.z)
+            let forward = -simd_float3(camera.columns.2.x, camera.columns.2.y, camera.columns.2.z)
+            let target = position + forward * Self.lookAheadMeters
+            let nearest = anchors.sorted {
+                simd_distance_squared(Self.centre(of: $0), target)
+                    < simd_distance_squared(Self.centre(of: $1), target)
+            }
+            chosen.append(contentsOf: nearest.prefix(Self.nearestPerRefresh))
         }
-        refreshCursor = (refreshCursor + Self.anchorsPerRefresh) % anchors.count
+        for k in 0..<min(Self.roundRobinPerRefresh, anchors.count) {
+            let anchor = anchors[(refreshCursor + k) % anchors.count]
+            if !chosen.contains(where: { $0.identifier == anchor.identifier }) {
+                chosen.append(anchor)
+            }
+        }
+        refreshCursor = (refreshCursor + Self.roundRobinPerRefresh) % anchors.count
+
+        for anchor in chosen {
+            guard let node = sceneView.node(for: anchor) else { continue }
+            apply(anchor, to: node)
+        }
+    }
+
+    private static func centre(of anchor: ARMeshAnchor) -> simd_float3 {
+        let t = anchor.transform.columns.3
+        return simd_float3(t.x, t.y, t.z)
     }
 
     func renderer(_ renderer: SCNSceneRenderer, didRemove node: SCNNode, for anchor: ARAnchor) {

@@ -14,17 +14,26 @@ import simd
 ///   yellow -- one or two good views
 ///   green  -- `goodDirections` or more good views
 ///
-/// "Good" is decided per depth sample, with the same criteria the server
-/// applies when it decides what to train on, so green here means the server
-/// will actually have usable data there:
+/// "Good" is decided per depth sample of a KEPT frame:
 ///   * the frame itself passed the motion-blur gate (only kept frames arrive);
-///   * LiDAR confidence at least medium (the server masks below that);
-///   * range `minRange`..`maxRange`: too far is too coarse; under 0.8 m is a
-///     close-up that shares no content with any other frame (the second real
-///     scan was full of 0.5 m wall close-ups that the map had rewarded);
+///   * range `minRange`..`maxRange`: too far is too coarse, too close is a hand;
 ///   * not a grazing view: the ray must hit the surface within
 ///     `maxGrazingDegrees` of its normal, estimated from neighbouring depth
 ///     samples. Grazing views are where the glossy-wardrobe streaks came from.
+///
+/// LiDAR confidence is deliberately NOT a criterion. It decides whether the
+/// server uses a pixel's depth, but every pixel still trains the colour, and
+/// that is what the map is about. Requiring confidence >= 1 kept dark and
+/// glossy surfaces (a dark desk, a lacquered door) blue forever, however long
+/// they were filmed: the LiDAR is unsure there, the camera is not.
+///
+/// Looking a vertex up is tolerant by design. ARKit's mesh is a smoothed
+/// fusion that sits a few centimetres off the raw depth samples, and it is
+/// re-meshed while scanning, so its vertices move. A single 10 cm voxel
+/// lookup put a vertex just across a voxel wall from its samples: surfaces
+/// never left blue, and yellow ones went back to blue when ARKit re-meshed.
+/// A vertex now reads the union of the 2x2x2 voxel block nearest to it,
+/// which covers +/- 5 cm on every axis.
 ///
 /// ARKit's mesh covers a wall the moment the phone sweeps past it, however
 /// fast; that used to read as "scanned". The mesh now stays blue until the
@@ -39,7 +48,9 @@ import simd
 /// point, which nobody managed for a ceiling.
 final class CoverageMap {
     static let voxelSize: Float = 0.10
-    static let minRange: Float = 0.8
+    /// 0.8 m made a desk or a shelf impossible to colour, because nobody films
+    /// a desk top from further than arm's length plus a step.
+    static let minRange: Float = 0.4
     /// Beyond this, LiDAR depth is too sparse and noisy to count as "seen".
     static let maxRange: Float = 3.0
     static let goodDirections = 3
@@ -81,21 +92,13 @@ final class CoverageMap {
                                  cameraTransform.columns.3.y,
                                  cameraTransform.columns.3.z)
 
-        var conf: CVPixelBuffer? = nil
-        if let c = confidenceMap, CVPixelBufferGetWidth(c) == w, CVPixelBufferGetHeight(c) == h {
-            conf = c
-        }
+        // Confidence is not used; see the type comment.
+        _ = confidenceMap
 
         CVPixelBufferLockBaseAddress(depthMap, .readOnly)
-        if let c = conf { CVPixelBufferLockBaseAddress(c, .readOnly) }
-        defer {
-            CVPixelBufferUnlockBaseAddress(depthMap, .readOnly)
-            if let c = conf { CVPixelBufferUnlockBaseAddress(c, .readOnly) }
-        }
+        defer { CVPixelBufferUnlockBaseAddress(depthMap, .readOnly) }
         guard let depthBase = CVPixelBufferGetBaseAddress(depthMap) else { return }
         let depthRow = CVPixelBufferGetBytesPerRow(depthMap)
-        let confBase = conf.flatMap { CVPixelBufferGetBaseAddress($0) }
-        let confRow = conf.map { CVPixelBufferGetBytesPerRow($0) } ?? 0
 
         var updates: [(Int64, UInt64)] = []
         updates.reserveCapacity((w / Self.sampleStep + 1) * (h / Self.sampleStep + 1))
@@ -119,10 +122,6 @@ final class CoverageMap {
         for v in stride(from: Self.sampleStep / 2, to: h, by: Self.sampleStep) {
             for u in stride(from: Self.sampleStep / 2, to: w, by: Self.sampleStep) {
                 guard let d = depth(u, v) else { continue }
-                if let cb = confBase,
-                   cb.loadUnaligned(fromByteOffset: v * confRow + u, as: UInt8.self) < 1 {
-                    continue
-                }
                 guard let dr = depth(u + n, v), let dd = depth(u, v + n),
                       abs(dr - d) < 0.05, abs(dd - d) < 0.05 else { continue }
                 let pc = unproject(u, v, d)
@@ -135,7 +134,8 @@ final class CoverageMap {
 
                 let world = cameraTransform * simd_float4(pc, 1)
                 let p = simd_float3(world.x, world.y, world.z)
-                guard let key = Self.key(p) else { continue }
+                guard let c = Self.cell(p) else { continue }
+                let key = Self.pack(c.0, c.1, c.2)
 
                 let toCamera = camera - p
                 let len = simd_length(toCamera)
@@ -161,6 +161,10 @@ final class CoverageMap {
                       anchorTransform: simd_float4x4) -> Data {
         var rgba = [Float](repeating: 0, count: count * 4)
         lock.lock()
+        // Neighbouring vertices mostly share a block, so the 8 lookups are
+        // done once per block, not once per vertex.
+        var lastCell: (Int64, Int64, Int64, Int64, Int64, Int64)? = nil
+        var lastSeen = 0
         vertexData.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
             for i in 0..<count {
                 let o = offset + i * stride
@@ -171,8 +175,14 @@ final class CoverageMap {
                                         1)
                 let world = anchorTransform * local
                 var seen = 0
-                if let key = Self.key(simd_float3(world.x, world.y, world.z)) {
-                    seen = cells[key]?.nonzeroBitCount ?? 0
+                if let cell = Self.cell(simd_float3(world.x, world.y, world.z)) {
+                    if let last = lastCell, last == cell {
+                        seen = lastSeen
+                    } else {
+                        seen = directionsNear(cell)
+                        lastCell = cell
+                        lastSeen = seen
+                    }
                 }
                 let c = Self.color(forDirections: seen)
                 rgba[i * 4] = c.0
@@ -185,20 +195,47 @@ final class CoverageMap {
         return rgba.withUnsafeBufferPointer { Data(buffer: $0) }
     }
 
-    /// Drawn as a filled, half-transparent surface (see ArkitPreviewView), so
-    /// the alpha here is what keeps the camera image visible underneath.
+    /// Distinct directions recorded in the 2x2x2 voxel block nearest to a
+    /// point. Caller holds `lock`.
+    private func directionsNear(_ c: (Int64, Int64, Int64, Int64, Int64, Int64)) -> Int {
+        var bits: UInt64 = 0
+        for a in 0..<2 {
+            let x = a == 0 ? c.0 : c.3
+            for b in 0..<2 {
+                let y = b == 0 ? c.1 : c.4
+                for d in 0..<2 {
+                    let z = d == 0 ? c.2 : c.5
+                    bits |= cells[Self.pack(x, y, z)] ?? 0
+                }
+            }
+        }
+        return bits.nonzeroBitCount
+    }
+
+    /// Drawn as one half-transparent layer (see ArkitPreviewView), so the
+    /// alpha here is what keeps the camera image visible underneath.
     private static func color(forDirections n: Int) -> (Float, Float, Float, Float) {
-        if n >= goodDirections { return (0.15, 0.90, 0.35, 0.50) }
-        if n > 0 { return (1.00, 0.85, 0.10, 0.50) }
-        return (0.25, 0.45, 1.00, 0.50)
+        if n >= goodDirections { return (0.15, 0.90, 0.35, 0.55) }
+        if n > 0 { return (1.00, 0.85, 0.10, 0.55) }
+        return (0.25, 0.45, 1.00, 0.55)
+    }
+
+    /// The voxel holding `p` (first three) and, per axis, the neighbouring
+    /// voxel on the side `p` is closer to (last three).
+    private static func cell(_ p: simd_float3) -> (Int64, Int64, Int64, Int64, Int64, Int64)? {
+        guard p.x.isFinite, p.y.isFinite, p.z.isFinite,
+              abs(p.x) < 100_000, abs(p.y) < 100_000, abs(p.z) < 100_000 else { return nil }
+        let gx = p.x / voxelSize, gy = p.y / voxelSize, gz = p.z / voxelSize
+        let fx = gx.rounded(.down), fy = gy.rounded(.down), fz = gz.rounded(.down)
+        let ix = Int64(fx), iy = Int64(fy), iz = Int64(fz)
+        return (ix, iy, iz,
+                gx - fx < 0.5 ? ix - 1 : ix + 1,
+                gy - fy < 0.5 ? iy - 1 : iy + 1,
+                gz - fz < 0.5 ? iz - 1 : iz + 1)
     }
 
     /// 21 bits per axis: unique within +/-100 km of the session origin.
-    private static func key(_ p: simd_float3) -> Int64? {
-        guard p.x.isFinite, p.y.isFinite, p.z.isFinite else { return nil }
-        let ix = Int64((p.x / voxelSize).rounded(.down)) & 0x1FFFFF
-        let iy = Int64((p.y / voxelSize).rounded(.down)) & 0x1FFFFF
-        let iz = Int64((p.z / voxelSize).rounded(.down)) & 0x1FFFFF
-        return (ix << 42) | (iy << 21) | iz
+    private static func pack(_ x: Int64, _ y: Int64, _ z: Int64) -> Int64 {
+        ((x & 0x1FFFFF) << 42) | ((y & 0x1FFFFF) << 21) | (z & 0x1FFFFF)
     }
 }

@@ -220,7 +220,7 @@ export default function LidarScanScreen({ navigation }: Props) {
                     ? 'YAVAŞLA — telefon çok hızlı, kareler bulanık çıkıyor ve kaydedilmiyor.'
                     : coverageOk
                       ? 'İyi gidiyor. Mavi ve sarı kalan yerlere 1-3 m uzaktan, başka bir noktadan bak; yaklaşmak sayılmaz.'
-                      : 'Ağ renkleri: mavi henüz iyi görülmedi, sarı 1-2 açıdan görüldü, yeşil tamam. Her kare odanın büyük kısmını görsün; 80 cm altından bakışlar sayılmaz.'}
+                      : 'Ağ renkleri: mavi henüz iyi görülmedi, sarı 1-2 açıdan görüldü, yeşil tamam. Bir yer sarıya dönmüyorsa ona 40 cm-3 m arasından, başka bir yönden bak.'}
             </Text>
 
             <Pressable
