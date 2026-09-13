@@ -35,6 +35,7 @@ export default function LidarScanScreen({ navigation }: Props) {
   const [angleCoverage, setAngleCoverage] = useState(0);
   const [bytesUsed, setBytesUsed] = useState(0);
   const [storageFull, setStorageFull] = useState(false);
+  const [tooFast, setTooFast] = useState(false);
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<PendingUpload | null>(null);
   const storageAlerted = useRef(false);
@@ -52,6 +53,7 @@ export default function LidarScanScreen({ navigation }: Props) {
       setAngleCoverage(payload.angleCoverage ?? 0);
       setBytesUsed(payload.bytesUsed ?? 0);
       if (payload.storageLimitReached) setStorageFull(true);
+      setTooFast(!!payload.movingTooFast);
     });
     return unsubscribe;
   }, []);
@@ -214,9 +216,11 @@ export default function LidarScanScreen({ navigation }: Props) {
                 ? "Telefonu normal aydınlık bir yere çevirip Başlat'a bas: pozlama o anda sabitlenir. Sonra odada yavaşça gezdir."
                 : storageFull
                   ? 'Kayıt sınırına ulaşıldı. Durdur ve Yükle ile taramayı tamamla.'
-                  : coverageOk
-                    ? 'İyi gidiyor. Sarı ve kırmızı kalan yerlere, özellikle köşelere ve tavana, başka açılardan da bak.'
-                    : 'Ağ renkleri: kırmızı hiç görülmedi, sarı az açıdan görüldü, yeşil iyi. Kırmızı ve sarı yerlere farklı açılardan bak.'}
+                  : tooFast
+                    ? 'YAVAŞLA — telefon çok hızlı, kareler bulanık çıkıyor ve kaydedilmiyor.'
+                    : coverageOk
+                      ? 'İyi gidiyor. Mavi ve sarı kalan yerlere, özellikle köşelere ve tavana, başka açılardan da bak.'
+                      : 'Ağ renkleri: mavi henüz iyi görülmedi, sarı 1-2 iyi açıdan görüldü, yeşil tamam. Her yer yeşil olana kadar gez.'}
             </Text>
 
             <Pressable

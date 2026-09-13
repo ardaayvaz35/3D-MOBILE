@@ -20,6 +20,12 @@ export type FrameCapturedPayload = {
    * taramayi bitirmeye yonlendirmek gerekiyor.
    */
   storageLimitReached: boolean;
+  /**
+   * The last several frames were rejected as motion-blurred (speed x
+   * exposure x focal length exceeded the smear limit). Nothing is being
+   * recorded until the user slows down, so tell them now.
+   */
+  movingTooFast: boolean;
 };
 
 export type CaptureResult = {

@@ -73,14 +73,33 @@ class CaptureManager {
     // baseline for 3DGS, so nothing is given up for the headroom.
     private static let minTranslationMeters: Float = 0.08
     private static let minRotationRadians: Float = 10.0 * .pi / 180.0
-    // Reject frames taken mid-swing: above this the exposure smears. The
-    // rate comes from consecutive ARKit poses, which costs nothing, rather
-    // than a per-frame Laplacian on the pixels, which would cost plenty.
-    private static let maxAngularSpeed: Float = 0.55  // rad/s
+    // Reject frames taken mid-swing. Motion blur is physical: the image
+    // smears by (angular speed + linear speed / distance) x exposure time x
+    // focal length, in pixels. All four are known at the frame instant --
+    // speeds from consecutive ARKit poses, exposure and focal length from
+    // the camera -- so the gate is exact, adapts to the light (a dim room
+    // means a long exposure means slower scanning), and costs nothing. A
+    // per-pixel sharpness statistic on the server cannot do this: checked
+    // on a real scan, it could not tell a blurred frame from a sharp plain
+    // wall, and threw away the walls.
+    // 6 px of a 1920 px frame. With a 1/60 s exposure that allows ~14 deg/s
+    // of panning, ~28 deg/s at 1/120 s in good light; the reference scan
+    // averaged ~20 deg/s and its frames were visibly soft. Stricter would
+    // make a room take minutes of creeping; looser is what we have now.
+    private static let maxSmearPixels: Float = 6.0
+    // Scene distance assumed for the linear-speed term. Indoors the camera is
+    // 1-3 m from what it films; 1.5 m errs on the strict side.
+    private static let nominalDepthMeters: Float = 1.5
+    // Absolute ceiling regardless of exposure: past this ARKit's own pose
+    // tracking degrades, whatever the pixels look like.
+    private static let maxAngularSpeed: Float = 1.2  // rad/s
+    // After this many consecutive blur rejections (~10 Hz), tell the user.
+    private static let tooFastAfterSkips = 5
     private var lastCaptureTime: TimeInterval = 0
     private var lastKeptTransform: simd_float4x4?
     private var previousTransform: simd_float4x4?
     private var previousTimestamp: TimeInterval = 0
+    private var blurStreak = 0
     private(set) var skippedBlurred = 0
     private(set) var skippedRedundant = 0
 
@@ -104,15 +123,15 @@ class CaptureManager {
     // gozle gorulur takilmaya yol aciyordu.
     private lazy var ciContext = CIContext()
 
-    /// (frameCount, angleCoveragePct 0..1, kullanilanBayt, butceDoldu)
-    private let onFrame: (Int, Double, Int, Bool) -> Void
+    /// (frameCount, angleCoveragePct 0..1, kullanilanBayt, butceDoldu, cokHizli)
+    private let onFrame: (Int, Double, Int, Bool, Bool) -> Void
     private(set) var isRecording = false
     private var frameCount = 0
     private var frames: [FrameData] = []
     private var recordingStart: Date?
     private var visitedSectors = Set<Int>()
 
-    init(onFrame: @escaping (Int, Double, Int, Bool) -> Void) {
+    init(onFrame: @escaping (Int, Double, Int, Bool, Bool) -> Void) {
         self.onFrame = onFrame
     }
 
@@ -133,6 +152,7 @@ class CaptureManager {
         previousTimestamp = 0
         skippedBlurred = 0
         skippedRedundant = 0
+        blurStreak = 0
         // The capture directory is reused across scans and the archive is now
         // zipped straight from it, so anything a previous scan left behind
         // would be shipped inside this one. Start from an empty directory.
@@ -234,9 +254,13 @@ class CaptureManager {
         // update it, even on frames we go on to skip, or the rate would be
         // measured across a gap and read as fast motion.
         var angularSpeed: Float = 0
+        var linearSpeed: Float = 0
         if let prev = previousTransform, frame.timestamp > previousTimestamp {
             let dt = Float(frame.timestamp - previousTimestamp)
-            if dt > 0 { angularSpeed = Self.angleBetween(prev, pose) / dt }
+            if dt > 0 {
+                angularSpeed = Self.angleBetween(prev, pose) / dt
+                linearSpeed = simd_distance(Self.translation(prev), Self.translation(pose)) / dt
+            }
         }
         previousTransform = pose
         previousTimestamp = frame.timestamp
@@ -253,18 +277,28 @@ class CaptureManager {
         // ki kullanici taramayi bitirmesi gerektigini ekranda gorsun.
         if budgetReached {
             registerAngleCoverage(transform: pose)
-            onFrame(frameCount, angleCoveragePct, imageBytesUsed, true)
+            onFrame(frameCount, angleCoveragePct, imageBytesUsed, true, false)
             return
         }
 
         // Blur gate: a smeared frame actively hurts -- the optimiser fits the
         // smear. Skipping costs nothing because the user is still moving and a
-        // sharp frame of the same view arrives a moment later.
-        if angularSpeed > Self.maxAngularSpeed {
+        // sharp frame of the same view arrives a moment later. The streak
+        // drives the on-screen "slow down" so a user sweeping too fast learns
+        // it now, not when the tour comes back streaky.
+        let exposure = Float(frame.camera.exposureDuration)
+        let focalPx = frame.camera.intrinsics[0][0]
+        let smearPx = (angularSpeed + linearSpeed / Self.nominalDepthMeters) * exposure * focalPx
+        if smearPx > Self.maxSmearPixels || angularSpeed > Self.maxAngularSpeed {
             skippedBlurred += 1
+            blurStreak += 1
             registerAngleCoverage(transform: pose)
+            if blurStreak >= Self.tooFastAfterSkips {
+                onFrame(frameCount, angleCoveragePct, imageBytesUsed, false, true)
+            }
             return
         }
+        blurStreak = 0
 
         // Novelty gate: measured against the last frame we KEPT, not the last
         // frame seen, so holding the phone still consumes no budget at all.
@@ -275,6 +309,8 @@ class CaptureManager {
             if moved < Self.minTranslationMeters && turned < Self.minRotationRadians {
                 skippedRedundant += 1
                 registerAngleCoverage(transform: pose)
+                // Holding still after a fast sweep must clear the warning.
+                onFrame(frameCount, angleCoveragePct, imageBytesUsed, false, false)
                 return
             }
         }
@@ -307,7 +343,7 @@ class CaptureManager {
         if imageBytesUsed + jpeg.count > Self.imageByteBudget {
             budgetReached = true
             registerAngleCoverage(transform: frame.camera.transform)
-            onFrame(frameCount, angleCoveragePct, imageBytesUsed, true)
+            onFrame(frameCount, angleCoveragePct, imageBytesUsed, true, false)
             return
         }
 
@@ -401,7 +437,7 @@ class CaptureManager {
                 cameraTransform: pose
             )
         }
-        onFrame(frameCount, angleCoveragePct, imageBytesUsed, false)
+        onFrame(frameCount, angleCoveragePct, imageBytesUsed, false, false)
     }
 
     private var angleCoveragePct: Double {
