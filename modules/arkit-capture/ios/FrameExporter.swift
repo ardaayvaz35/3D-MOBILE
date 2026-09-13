@@ -67,6 +67,9 @@ class FrameExporter {
                 // correction and silently wrong if guessed.
                 "depth_width": frame.depthWidth,
                 "depth_height": frame.depthHeight,
+                // Constant across frames when the exposure lock held.
+                "exposure_duration": frame.exposureDuration,
+                "exposure_offset": frame.exposureOffset,
             ])
         }
 

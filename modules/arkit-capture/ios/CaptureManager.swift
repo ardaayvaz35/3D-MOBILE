@@ -37,6 +37,11 @@ class CaptureManager {
         // yeniden sekillendiremez; sabit varsaymak da cihaz degisince bozar.
         let depthWidth: Int
         let depthHeight: Int
+        // Exposure the frame was actually taken at. With the recording's lock
+        // holding these stay constant, which lets the server verify the lock
+        // worked instead of trusting that it was requested.
+        let exposureDuration: Double
+        let exposureOffset: Float
     }
 
     struct ExportResult {
@@ -133,6 +138,9 @@ class CaptureManager {
         // would be shipped inside this one. Start from an empty directory.
         try? FileManager.default.removeItem(at: tempDir)
         try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        // Before the first frame is taken, so every kept frame shares one
+        // exposure and one white balance. See lockExposureAndWhiteBalance().
+        ArkitSessionHost.shared.lockExposureAndWhiteBalance()
         isRecording = true
         recordingStart = Date()
         ArkitSessionHost.shared.onFrame = { [weak self] frame in
@@ -142,6 +150,7 @@ class CaptureManager {
 
     func stopRecordingAndExport() throws -> ExportResult {
         isRecording = false
+        ArkitSessionHost.shared.unlockExposureAndWhiteBalance()
 
         // Grab the fused LiDAR mesh BEFORE clearing the frame sink / tearing
         // down: these ARMeshAnchors are ARKit's realtime reconstruction (the
@@ -373,7 +382,9 @@ class CaptureManager {
             imageWidth: outWidth,
             imageHeight: outHeight,
             depthWidth: depthWidth,
-            depthHeight: depthHeight
+            depthHeight: depthHeight,
+            exposureDuration: frame.camera.exposureDuration,
+            exposureOffset: frame.camera.exposureOffset
         ))
 
         registerAngleCoverage(transform: transform)
