@@ -11,8 +11,7 @@ import simd
 /// by eye while scanning; the colours make it visible:
 ///
 ///   blue   -- meshed by ARKit but no GOOD view of it yet
-///   orange -- one good view
-///   yellow -- two good views
+///   yellow -- one or two good views
 ///   green  -- `goodDirections` or more good views
 ///
 /// "Good" is decided per depth sample, with the same criteria the server
@@ -187,10 +186,9 @@ final class CoverageMap {
     /// Drawn as a filled, half-transparent surface (see ArkitPreviewView), so
     /// the alpha here is what keeps the camera image visible underneath.
     private static func color(forDirections n: Int) -> (Float, Float, Float, Float) {
-        if n >= goodDirections { return (0.20, 0.90, 0.40, 0.50) }
-        if n == 2 { return (1.00, 0.90, 0.15, 0.50) }
-        if n == 1 { return (1.00, 0.50, 0.10, 0.50) }
-        return (0.30, 0.50, 1.00, 0.50)
+        if n >= goodDirections { return (0.15, 0.90, 0.35, 0.50) }
+        if n > 0 { return (1.00, 0.85, 0.10, 0.50) }
+        return (0.25, 0.45, 1.00, 0.50)
     }
 
     /// 21 bits per axis: unique within +/-100 km of the session origin.
