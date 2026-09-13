@@ -81,11 +81,14 @@ class ArkitPreviewView: ExpoView, ARSCNViewDelegate {
     }()
 
     /// Kapsama isi haritasi materyali: renk vertex basina CoverageMap'ten
-    /// geliyor, bu yuzden diffuse beyaz ve emisyon yok.
+    /// geliyor, bu yuzden diffuse beyaz ve emisyon yok. Tel kafes yerine dolu
+    /// yuzey: 1 px cizgilerde renk okunmuyordu ve ag "cok saydam" gorunuyordu;
+    /// yari saydamlik vertex alfasindan (0.5) geliyor.
     private static let coverageMaterial: SCNMaterial = {
         let m = SCNMaterial()
         m.diffuse.contents = UIColor.white
-        m.fillMode = .lines
+        m.fillMode = .fill
+        m.transparencyMode = .aOne
         m.isDoubleSided = true
         m.blendMode = .alpha
         m.lightingModel = .constant

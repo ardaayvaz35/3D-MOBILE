@@ -219,8 +219,8 @@ export default function LidarScanScreen({ navigation }: Props) {
                   : tooFast
                     ? 'YAVAŞLA — telefon çok hızlı, kareler bulanık çıkıyor ve kaydedilmiyor.'
                     : coverageOk
-                      ? 'İyi gidiyor. Mavi ve sarı kalan yerlere, özellikle köşelere ve tavana, başka açılardan da bak.'
-                      : 'Ağ renkleri: mavi henüz iyi görülmedi, sarı 1-2 iyi açıdan görüldü, yeşil tamam. Her yer yeşil olana kadar gez.'}
+                      ? 'İyi gidiyor. Mavi, turuncu ve sarı kalan yerlere, özellikle köşelere ve tavana, başka açılardan da bak.'
+                      : 'Ağ renkleri: mavi henüz iyi görülmedi, turuncu 1, sarı 2 iyi açıdan görüldü, yeşil tamam. Her yer yeşil olana kadar gez.'}
             </Text>
 
             <Pressable

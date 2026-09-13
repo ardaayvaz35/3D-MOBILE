@@ -11,7 +11,8 @@ import simd
 /// by eye while scanning; the colours make it visible:
 ///
 ///   blue   -- meshed by ARKit but no GOOD view of it yet
-///   yellow -- one or two good views
+///   orange -- one good view
+///   yellow -- two good views
 ///   green  -- `goodDirections` or more good views
 ///
 /// "Good" is decided per depth sample, with the same criteria the server
@@ -29,9 +30,12 @@ import simd
 /// data behind it is good, which is the whole point.
 ///
 /// Space is a sparse 10 cm voxel grid over world points unprojected from each
-/// kept frame's LiDAR depth. Per voxel a 24-bit mask records the directions it
-/// was seen from: 8 azimuth sectors x 3 elevation bands of the vector from the
-/// surface back to the camera.
+/// kept frame's LiDAR depth. Per voxel a 48-bit mask records the directions it
+/// was seen from: 16 azimuth sectors (22.5 deg) x 3 elevation bands of the
+/// vector from the surface back to the camera. Three sectors, i.e. about 45
+/// degrees of parallax, is enough for the optimiser to pin the surface; the
+/// earlier 45-degree sectors made green need a 90-degree walk around every
+/// point, which nobody managed for a ceiling.
 final class CoverageMap {
     static let voxelSize: Float = 0.10
     static let minRange: Float = 0.3
@@ -44,7 +48,7 @@ final class CoverageMap {
     /// a voxel, for ~1.4k points a frame.
     private static let sampleStep = 6
 
-    private var cells: [Int64: UInt32] = [:]
+    private var cells: [Int64: UInt64] = [:]
     private let lock = NSLock()
 
     func reset() {
@@ -92,7 +96,7 @@ final class CoverageMap {
         let confBase = conf.flatMap { CVPixelBufferGetBaseAddress($0) }
         let confRow = conf.map { CVPixelBufferGetBytesPerRow($0) } ?? 0
 
-        var updates: [(Int64, UInt32)] = []
+        var updates: [(Int64, UInt64)] = []
         updates.reserveCapacity((w / Self.sampleStep + 1) * (h / Self.sampleStep + 1))
 
         // Depth at (u, v), or nil when missing / out of range.
@@ -137,9 +141,9 @@ final class CoverageMap {
                 guard len > 1e-4 else { continue }
                 let dir = toCamera / len
                 let azimuth = (atan2(dir.x, dir.z) + Float.pi) / (2 * Float.pi)
-                let azBin = min(7, max(0, Int(azimuth * 8)))
+                let azBin = min(15, max(0, Int(azimuth * 16)))
                 let elBin = dir.y < -0.35 ? 0 : (dir.y > 0.35 ? 2 : 1)
-                updates.append((key, UInt32(1) << UInt32(elBin * 8 + azBin)))
+                updates.append((key, UInt64(1) << UInt64(elBin * 16 + azBin)))
             }
         }
 
@@ -180,10 +184,13 @@ final class CoverageMap {
         return rgba.withUnsafeBufferPointer { Data(buffer: $0) }
     }
 
+    /// Drawn as a filled, half-transparent surface (see ArkitPreviewView), so
+    /// the alpha here is what keeps the camera image visible underneath.
     private static func color(forDirections n: Int) -> (Float, Float, Float, Float) {
-        if n >= goodDirections { return (0.30, 0.90, 0.45, 0.85) }
-        if n > 0 { return (1.00, 0.80, 0.20, 0.85) }
-        return (0.35, 0.55, 1.00, 0.85)
+        if n >= goodDirections { return (0.20, 0.90, 0.40, 0.50) }
+        if n == 2 { return (1.00, 0.90, 0.15, 0.50) }
+        if n == 1 { return (1.00, 0.50, 0.10, 0.50) }
+        return (0.30, 0.50, 1.00, 0.50)
     }
 
     /// 21 bits per axis: unique within +/-100 km of the session origin.
