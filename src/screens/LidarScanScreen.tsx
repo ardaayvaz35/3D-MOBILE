@@ -213,14 +213,14 @@ export default function LidarScanScreen({ navigation }: Props) {
           <View style={styles.bottomBar}>
             <Text style={styles.infoText}>
               {!recording
-                ? "Telefonu normal aydınlık bir yere çevirip Başlat'a bas: pozlama o anda sabitlenir. Sonra odada yavaşça gezdir."
+                ? "Telefonu normal aydınlık bir yere çevirip Başlat'a bas: pozlama o anda sabitlenir. Sonra odanın ortasında dur, göğüs / göz / diz hizasında birer tam tur dön; ardından duvar kenarından odanın içine bakarak yürü. Hep 1-3 m uzaktan bak, duvara yaklaşma."
                 : storageFull
                   ? 'Kayıt sınırına ulaşıldı. Durdur ve Yükle ile taramayı tamamla.'
                   : tooFast
                     ? 'YAVAŞLA — telefon çok hızlı, kareler bulanık çıkıyor ve kaydedilmiyor.'
                     : coverageOk
-                      ? 'İyi gidiyor. Mavi ve sarı kalan yerlere, özellikle köşelere ve tavana, başka açılardan da bak.'
-                      : 'Ağ renkleri: mavi henüz iyi görülmedi, sarı 1-2 iyi açıdan görüldü, yeşil tamam. Her yer yeşil olana kadar gez.'}
+                      ? 'İyi gidiyor. Mavi ve sarı kalan yerlere 1-3 m uzaktan, başka bir noktadan bak; yaklaşmak sayılmaz.'
+                      : 'Ağ renkleri: mavi henüz iyi görülmedi, sarı 1-2 açıdan görüldü, yeşil tamam. Her kare odanın büyük kısmını görsün; 80 cm'den yakın bakışlar sayılmaz.'}
             </Text>
 
             <Pressable

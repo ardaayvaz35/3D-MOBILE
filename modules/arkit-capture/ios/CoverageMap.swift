@@ -19,7 +19,9 @@ import simd
 /// will actually have usable data there:
 ///   * the frame itself passed the motion-blur gate (only kept frames arrive);
 ///   * LiDAR confidence at least medium (the server masks below that);
-///   * range `minRange`..`maxRange`: too far is too coarse, too close is a hand;
+///   * range `minRange`..`maxRange`: too far is too coarse; under 0.8 m is a
+///     close-up that shares no content with any other frame (the second real
+///     scan was full of 0.5 m wall close-ups that the map had rewarded);
 ///   * not a grazing view: the ray must hit the surface within
 ///     `maxGrazingDegrees` of its normal, estimated from neighbouring depth
 ///     samples. Grazing views are where the glossy-wardrobe streaks came from.
@@ -37,7 +39,7 @@ import simd
 /// point, which nobody managed for a ceiling.
 final class CoverageMap {
     static let voxelSize: Float = 0.10
-    static let minRange: Float = 0.3
+    static let minRange: Float = 0.8
     /// Beyond this, LiDAR depth is too sparse and noisy to count as "seen".
     static let maxRange: Float = 3.0
     static let goodDirections = 3

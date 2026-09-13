@@ -61,40 +61,40 @@ class CaptureManager {
     // 5.73 m room. 3DGS wants angular coverage and sharp frames, so select on
     // exactly those two things and the same budget reaches around a whole room.
     //
-    // A short interval still guards CPU (JPEG encoding is not free at 60 fps).
-    private static let minFrameInterval: TimeInterval = 0.1
-    // Keep a frame only once the camera has actually moved somewhere new.
-    // Sized against the byte budget, not just against what looks "new": a
-    // thorough room walk is on the order of 15 m of path, so an 8 cm step
-    // yields ~190 translation-triggered frames plus rotation-triggered ones
-    // -- roughly 250 frames, ~18 MB, comfortably inside the 34 MB budget.
-    // At 6 cm a continuous walk could still exhaust the budget mid-room,
-    // which is the failure we are fixing. 8 cm is also a healthy stereo
-    // baseline for 3DGS, so nothing is given up for the headroom.
-    private static let minTranslationMeters: Float = 0.08
-    private static let minRotationRadians: Float = 10.0 * .pi / 180.0
-    // Reject frames taken mid-swing. Motion blur is physical: the image
-    // smears by (angular speed + linear speed / distance) x exposure time x
-    // focal length, in pixels. All four are known at the frame instant --
-    // speeds from consecutive ARKit poses, exposure and focal length from
-    // the camera -- so the gate is exact, adapts to the light (a dim room
-    // means a long exposure means slower scanning), and costs nothing. A
-    // per-pixel sharpness statistic on the server cannot do this: checked
-    // on a real scan, it could not tell a blurred frame from a sharp plain
-    // wall, and threw away the walls.
-    // 6 px of a 1920 px frame. With a 1/60 s exposure that allows ~14 deg/s
-    // of panning, ~28 deg/s at 1/120 s in good light; the reference scan
-    // averaged ~20 deg/s and its frames were visibly soft. Stricter would
-    // make a room take minutes of creeping; looser is what we have now.
-    private static let maxSmearPixels: Float = 6.0
+    // Cadence. ARKit delivers 60 fps; a splat wants the same surface in many
+    // frames from slightly different places, not 60 near-identical copies.
+    // Measured on the two real scans: 0.5 s spacing (241 frames / 160 s)
+    // trained tolerably; the previous gates thinned the next scan to 1.5 s
+    // spacing (281 frames over 592 s and 75 m of path, one frame per 27 cm)
+    // and every surface seen in only 2-3 frames exploded into spikes. The
+    // fix is to SELECT a sharp frame every window, never to skip a window:
+    // at 4 fps a 5-minute room is ~1200 frames.
+    private static let frameInterval: TimeInterval = 0.25
+    // Novelty: only skip frames when the phone is genuinely parked. The old
+    // 8 cm / 10 deg rule was sized for a 34 MB budget that no longer exists
+    // and at a careful 0.1 m/s walk it alone stretched spacing to ~0.8 s.
+    private static let minTranslationMeters: Float = 0.02
+    private static let minRotationRadians: Float = 2.0 * .pi / 180.0
+    // Blur. The smear in pixels is (angular speed + linear speed / distance)
+    // x exposure x focal length, all known at the frame instant. 12 px of a
+    // 1920 px frame at a 1/60 s exposure allows ~28 deg/s of panning, about
+    // what a careful walk does. The old 6 px (14 deg/s) rejected most of a
+    // normal scan; on the reference scan (median 20 deg/s) only 1 of 241
+    // frames was actually smeared, so the physics threshold was simply set
+    // too tight. Inside a window we wait for a sharp frame instead of
+    // dropping the window; if none arrives for `starvedAfter` seconds the
+    // threshold is relaxed so the gap cannot grow past that.
+    private static let maxSmearPixels: Float = 12.0
+    private static let starvedAfter: TimeInterval = 1.0
+    private static let starvedSmearFactor: Float = 3.0
     // Scene distance assumed for the linear-speed term. Indoors the camera is
     // 1-3 m from what it films; 1.5 m errs on the strict side.
     private static let nominalDepthMeters: Float = 1.5
     // Absolute ceiling regardless of exposure: past this ARKit's own pose
     // tracking degrades, whatever the pixels look like.
     private static let maxAngularSpeed: Float = 1.2  // rad/s
-    // After this many consecutive blur rejections (~10 Hz), tell the user.
-    private static let tooFastAfterSkips = 5
+    // After this many consecutive blur rejections (~60 Hz), tell the user.
+    private static let tooFastAfterSkips = 30
     private var lastCaptureTime: TimeInterval = 0
     private var lastKeptTransform: simd_float4x4?
     private var previousTransform: simd_float4x4?
@@ -113,8 +113,8 @@ class CaptureManager {
     // artik depolama sinirini degil yukleme suresini ve telefon isinmasini
     // sinirliyor: ~700 KB/kare ile 400+ kareye yetiyor, ki olculen en uzun
     // tarama 186 kare kullandi.
-    private static let imageByteBudget = 300 * 1024 * 1024
-    private static let jpegQuality: Double = 0.9
+    private static let imageByteBudget = 1200 * 1024 * 1024
+    private static let jpegQuality: Double = 0.85
     private static let targetLongEdge: CGFloat = 1920
     private var imageBytesUsed = 0
     private var budgetReached = false
@@ -267,11 +267,11 @@ class CaptureManager {
 
         // Angle-coverage tracking updates on every skip path too, so the UI
         // progress stays responsive whatever we decide about this frame.
-        if frame.timestamp - lastCaptureTime < Self.minFrameInterval {
+        let sinceKept = frame.timestamp - lastCaptureTime
+        if sinceKept < Self.frameInterval {
             registerAngleCoverage(transform: pose)
             return
         }
-        lastCaptureTime = frame.timestamp
 
         // Butce dolduysa yeni kare biriktirme, ama aci takibi ve olaylar aksin
         // ki kullanici taramayi bitirmesi gerektigini ekranda gorsun.
@@ -289,7 +289,9 @@ class CaptureManager {
         let exposure = Float(frame.camera.exposureDuration)
         let focalPx = frame.camera.intrinsics[0][0]
         let smearPx = (angularSpeed + linearSpeed / Self.nominalDepthMeters) * exposure * focalPx
-        if smearPx > Self.maxSmearPixels || angularSpeed > Self.maxAngularSpeed {
+        let smearLimit = sinceKept > Self.starvedAfter
+            ? Self.maxSmearPixels * Self.starvedSmearFactor : Self.maxSmearPixels
+        if smearPx > smearLimit || angularSpeed > Self.maxAngularSpeed {
             skippedBlurred += 1
             blurStreak += 1
             registerAngleCoverage(transform: pose)
@@ -357,10 +359,11 @@ class CaptureManager {
         }
         imageBytesUsed += jpeg.count
         frameCount += 1
-        // Only advance the novelty reference once the frame is actually on
-        // disk; a failed write above must not make the next frame look
-        // redundant against a view we never stored.
+        // Only advance the novelty reference and the cadence clock once the
+        // frame is actually on disk; a failed write above must not make the
+        // next frame look redundant against a view we never stored.
         lastKeptTransform = pose
+        lastCaptureTime = frame.timestamp
 
         let transform = pose
 
