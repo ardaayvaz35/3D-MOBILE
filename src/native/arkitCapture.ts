@@ -1,10 +1,20 @@
 import type React from 'react';
-import type { CaptureResult, FrameCapturedPayload } from '../../modules/arkit-capture/src/ArkitCapture.types';
+import type {
+  CaptureResult,
+  FrameCapturedPayload,
+  WindowScanResult,
+  WindowShotResult,
+} from '../../modules/arkit-capture/src/ArkitCapture.types';
 
 type NativeModuleShape = {
   isLidarSupported(): boolean;
   startRecording(): void;
   stopRecording(): Promise<CaptureResult>;
+  beginWindowScan(): void;
+  setExposurePoint(x: number, y: number): void;
+  captureWindowShot(): Promise<WindowShotResult>;
+  finishWindowScan(): Promise<WindowScanResult>;
+  cancelWindowScan(): void;
   addListener(
     eventName: 'onFrameCaptured',
     listener: (payload: FrameCapturedPayload) => void
@@ -61,6 +71,36 @@ export function onFrameCaptured(listener: (payload: FrameCapturedPayload) => voi
   if (!nativeModule) return () => {};
   const subscription = nativeModule.addListener('onFrameCaptured', listener);
   return () => subscription.remove();
+}
+
+function requireModule(): NativeModuleShape {
+  if (!nativeModule) {
+    throw new Error('ArkitCapture native modülü mevcut değil (Dev Client gerekli)');
+  }
+  return nativeModule;
+}
+
+/** Window pass: switches the live session to photo mode (no mesh, high-res stills). */
+export function beginWindowScan(): void {
+  requireModule().beginWindowScan();
+}
+
+/** Meter exposure on a point of the preview; x, y are 0..1 of the view. */
+export function setWindowExposurePoint(x: number, y: number): void {
+  requireModule().setExposurePoint(x, y);
+}
+
+/** One press: three exposures (-1.5 / 0 / +1.5 EV) with their ARKit poses. */
+export function captureWindowShot(): Promise<WindowShotResult> {
+  return requireModule().captureWindowShot();
+}
+
+export function finishWindowScan(): Promise<WindowScanResult> {
+  return requireModule().finishWindowScan();
+}
+
+export function cancelWindowScan(): void {
+  nativeModule?.cancelWindowScan();
 }
 
 export const ArkitPreviewView = PreviewViewComponent;

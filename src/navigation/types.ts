@@ -10,6 +10,7 @@ export type RootStackParamList = {
   PhotoScan: undefined;
   VideoScan: undefined;
   LidarScan: undefined;
+  WindowScan: undefined;
   Status: { captureId: string };
   Viewer: { captureId: string };
   CaptureDetail: { captureId: string };

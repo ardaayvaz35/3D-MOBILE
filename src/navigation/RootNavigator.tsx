@@ -12,6 +12,7 @@ import MyScansScreen from '../screens/MyScansScreen';
 import PhotoScanScreen from '../screens/PhotoScanScreen';
 import VideoScanScreen from '../screens/VideoScanScreen';
 import LidarScanScreen from '../screens/LidarScanScreen';
+import WindowScanScreen from '../screens/WindowScanScreen';
 import StatusScreen from '../screens/StatusScreen';
 import ViewerScreen from '../screens/ViewerScreen';
 import CaptureDetailScreen from '../screens/CaptureDetailScreen';
@@ -49,6 +50,7 @@ function MainNavigator() {
       <MainStack.Screen name="PhotoScan" component={PhotoScanScreen} options={{ title: 'Foto ile Tara' }} />
       <MainStack.Screen name="VideoScan" component={VideoScanScreen} options={{ title: 'Video ile Tara' }} />
       <MainStack.Screen name="LidarScan" component={LidarScanScreen} options={{ title: 'LiDAR ile Tara' }} />
+      <MainStack.Screen name="WindowScan" component={WindowScanScreen} options={{ title: 'Pencere Tara' }} />
       <MainStack.Screen name="Status" component={StatusScreen} options={{ title: 'İşleniyor', headerBackVisible: false }} />
       <MainStack.Screen name="Viewer" component={ViewerScreen} options={{ title: '3D Model' }} />
       <MainStack.Screen name="CaptureDetail" component={CaptureDetailScreen} options={{ title: 'Tarama' }} />

@@ -121,10 +121,10 @@ async function resolveUploadTarget(ext: string, mimeType: string): Promise<Uploa
   return { backend: 'supabase', uploadUrl: signed.signedUrl, storagePath, fallbackReason: reason };
 }
 
-export async function uploadCapture(
-  archive: LocalArchive,
-  clientType: ClientType
-): Promise<UploadResponse> {
+/// Streams the archive to storage and returns where it landed. No row, no
+/// credits, no GPU -- that is `submit-capture`'s job, and only uploadCapture
+/// calls it.
+async function putArchive(archive: LocalArchive): Promise<UploadTarget> {
   const ext = /\.(tar\.gz|tgz)$/i.test(archive.name) ? '.tar.gz' : '.zip';
 
   const info = await FileSystem.getInfoAsync(archive.uri);
@@ -178,7 +178,14 @@ export async function uploadCapture(
       `Yükleme başarısız (HTTP ${uploadRes.status}): ${uploadRes.body?.slice(0, 200) ?? ''}`
     );
   }
-  const storagePath = target.storagePath;
+  return target;
+}
+
+export async function uploadCapture(
+  archive: LocalArchive,
+  clientType: ClientType
+): Promise<UploadResponse> {
+  const storagePath = (await putArchive(archive)).storagePath;
   console.log('[upload] file uploaded, invoking submit-capture...');
 
   // Hand off to the Edge Function (credits + GPU trigger).
@@ -195,6 +202,17 @@ export async function uploadCapture(
   console.log('[upload] submit-capture OK, capture_id:', data?.capture_id);
 
   return { capture_id: data.capture_id, status: data.status ?? 'uploaded', message: 'Yüklendi' };
+}
+
+/// Window pass photos (see WindowScanScreen): stored for the server to pick
+/// up by path. Deliberately does not call submit-capture, so it creates no
+/// capture row, charges no credits and starts no GPU.
+export async function uploadWindowShots(
+  archive: LocalArchive
+): Promise<{ storagePath: string; backend: UploadTarget['backend'] }> {
+  const target = await putArchive(archive);
+  console.log('[upload] window shots stored at', target.backend, target.storagePath);
+  return { storagePath: target.storagePath, backend: target.backend };
 }
 
 export type CaptureListItem = {

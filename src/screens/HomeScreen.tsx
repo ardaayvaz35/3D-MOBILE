@@ -92,6 +92,18 @@ export default function HomeScreen({ navigation }: Props) {
             otomatik kare çıkarıp işler.
           </Text>
         </Pressable>
+
+        <Pressable
+          style={[styles.card, !lidarReady && styles.cardDisabled]}
+          onPress={() => navigation.navigate('WindowScan')}
+        >
+          <Text style={styles.cardTitle}>Pencere Tara</Text>
+          <Text style={styles.cardSubtitle}>
+            {lidarReady
+              ? 'Pencereden dışarıyı tek tek fotoğrafla çek (deneme). Manzara turda camın içinden gösterilecek.'
+              : 'Bu sürümde mevcut değil. Dev Client (EAS build) gerekli.'}
+          </Text>
+        </Pressable>
       </View>
     </SafeAreaView>
   );

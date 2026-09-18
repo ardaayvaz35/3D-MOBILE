@@ -33,7 +33,24 @@ final class ArkitSessionHost: NSObject, ARSessionDelegate {
         viewCount += 1
         guard !isRunning else { return }
         guard ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) else { return }
+        session.run(makeConfiguration())
+        isRunning = true
+    }
+
+    private func makeConfiguration() -> ARWorldTrackingConfiguration {
         let config = ARWorldTrackingConfiguration()
+        windowHighResAvailable = false
+        if windowMode {
+            // Window pass: photos only. No mesh or depth (the view is far past
+            // LiDAR range and the phone stays cooler), and the video format that
+            // allows full-sensor stills where the OS offers one.
+            if #available(iOS 16.0, *),
+               let format = ARWorldTrackingConfiguration.recommendedVideoFormatForHighResolutionFrameCapturing {
+                config.videoFormat = format
+                windowHighResAvailable = true
+            }
+            return config
+        }
         config.sceneReconstruction = .mesh
         // One depth stream, not two. Both used to be requested, but only the
         // smoothed map is saved; producing the raw one as well was pure load
@@ -43,8 +60,25 @@ final class ArkitSessionHost: NSObject, ARSessionDelegate {
         } else {
             config.frameSemantics = [.sceneDepth]
         }
-        session.run(config)
-        isRunning = true
+        return config
+    }
+
+    /// True while the window pass owns the session (see WindowShotSession).
+    private(set) var windowMode = false
+    /// The running configuration can take full-sensor stills.
+    private(set) var windowHighResAvailable = false
+
+    /// Switches the live session between the LiDAR scan configuration and the
+    /// window pass one. Re-running without reset options keeps tracking, so the
+    /// preview does not jump.
+    func setWindowMode(_ on: Bool) {
+        let apply = {
+            guard self.windowMode != on else { return }
+            self.windowMode = on
+            if !on { self.unlockExposureAndWhiteBalance() }
+            if self.isRunning { self.session.run(self.makeConfiguration()) }
+        }
+        if Thread.isMainThread { apply() } else { DispatchQueue.main.sync(execute: apply) }
     }
 
     /// Balances `start()`. The session only actually stops once the last
@@ -118,6 +152,99 @@ final class ArkitSessionHost: NSObject, ARSessionDelegate {
         }
         if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
             device.whiteBalanceMode = .continuousAutoWhiteBalance
+        }
+    }
+
+    // MARK: Window pass exposure
+
+    struct ExposureState {
+        let duration: CMTime
+        let iso: Float
+    }
+
+    private func withDevice(_ body: (AVCaptureDevice) -> Void) {
+        guard #available(iOS 16.0, *),
+              let device = ARWorldTrackingConfiguration.configurableCaptureDeviceForPrimaryCamera
+        else { return }
+        do {
+            try device.lockForConfiguration()
+        } catch {
+            return
+        }
+        defer { device.unlockForConfiguration() }
+        body(device)
+    }
+
+    /// Meters on the tapped point and keeps adapting there. `x`, `y` are 0..1
+    /// in the portrait preview; the sensor is landscape (home side right), so
+    /// the point is rotated into the device's own coordinates.
+    func setExposurePoint(x: Double, y: Double) {
+        withDevice { device in
+            let p = CGPoint(x: min(max(y, 0), 1), y: min(max(1 - x, 0), 1))
+            if device.isExposurePointOfInterestSupported {
+                device.exposurePointOfInterest = p
+            }
+            if device.isExposureModeSupported(.continuousAutoExposure) {
+                device.exposureMode = .continuousAutoExposure
+            }
+            device.setExposureTargetBias(0, completionHandler: nil)
+        }
+    }
+
+    func currentExposure() -> ExposureState? {
+        var state: ExposureState?
+        withDevice { device in
+            state = ExposureState(duration: device.exposureDuration, iso: device.iso)
+        }
+        return state
+    }
+
+    func currentISO() -> Float {
+        var iso: Float = 0
+        withDevice { iso = $0.iso }
+        return iso
+    }
+
+    /// Sets `base` shifted by `evBias` stops: longer or shorter shutter first,
+    /// ISO only past the shutter's limits. White balance is held for the
+    /// bracket so the three shots differ in brightness alone.
+    func applyExposure(base: ExposureState?, evBias: Float) {
+        withDevice { device in
+            if device.isWhiteBalanceModeSupported(.locked) {
+                device.whiteBalanceMode = .locked
+            }
+            guard let base = base, device.isExposureModeSupported(.custom) else {
+                device.setExposureTargetBias(evBias, completionHandler: nil)
+                return
+            }
+            let format = device.activeFormat
+            var seconds = base.duration.seconds * pow(2.0, Double(evBias))
+            var iso = base.iso
+            let maxS = format.maxExposureDuration.seconds
+            let minS = format.minExposureDuration.seconds
+            if seconds > maxS {
+                iso *= Float(seconds / maxS)
+                seconds = maxS
+            } else if seconds < minS {
+                iso *= Float(seconds / minS)
+                seconds = minS
+            }
+            iso = min(max(iso, format.minISO), format.maxISO)
+            device.setExposureModeCustom(
+                duration: CMTime(seconds: seconds, preferredTimescale: 1_000_000_000),
+                iso: iso, completionHandler: nil)
+        }
+    }
+
+    /// Back to metering on the tapped point after a bracket.
+    func resumeAutoExposure() {
+        withDevice { device in
+            if device.isExposureModeSupported(.continuousAutoExposure) {
+                device.exposureMode = .continuousAutoExposure
+            }
+            if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
+                device.whiteBalanceMode = .continuousAutoWhiteBalance
+            }
         }
     }
 

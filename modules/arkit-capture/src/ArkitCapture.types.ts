@@ -39,3 +39,15 @@ export type CaptureResult = {
   frameCount: number;
   durationSeconds: number;
 };
+
+export type WindowShotResult = {
+  /** Button presses so far; each press saves three exposures. */
+  shotCount: number;
+};
+
+export type WindowScanResult = {
+  archivePath: string;
+  /** JPEG files in the archive (shotCount x 3 exposures). */
+  photoCount: number;
+  shotCount: number;
+};
