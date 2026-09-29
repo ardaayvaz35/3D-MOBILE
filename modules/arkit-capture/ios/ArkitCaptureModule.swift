@@ -8,11 +8,16 @@ public class ArkitCaptureModule: Module {
   public func definition() -> ModuleDefinition {
     Name("ArkitCapture")
 
-    Events("onFrameCaptured", "onTrackingStateChanged")
+    Events("onFrameCaptured", "onTrackingStateChanged", "onGuidance")
 
     Function("isLidarSupported") { () -> Bool in
       ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
         && ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
+    }
+
+    // Measurement for the 0.5x question; see ArkitSessionHost.videoFormatReport.
+    Function("getVideoFormats") { () -> [String: Any] in
+      ["formats": ArkitSessionHost.videoFormatReport()]
     }
 
     Function("startRecording") { () -> Void in
@@ -26,6 +31,8 @@ public class ArkitCaptureModule: Module {
             "movingTooFast": tooFast,
             "thermalState": thermalState,
           ])
+        }, onGuidance: { payload in
+          self.sendEvent("onGuidance", payload)
         })
       }
       self.captureManager?.startRecording()

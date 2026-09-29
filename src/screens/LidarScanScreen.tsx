@@ -8,8 +8,12 @@ import {
   startLidarRecording,
   stopLidarRecording,
   onFrameCaptured,
+  onGuidance,
+  getVideoFormats,
   ArkitPreviewView,
 } from '../native/arkitCapture';
+import type { GuidancePayload } from '../../modules/arkit-capture/src/ArkitCapture.types';
+import GuidanceOverlay, { guidanceHint } from './GuidanceOverlay';
 import { uploadCapture } from '../api/captures';
 import {
   clearPendingUpload,
@@ -42,6 +46,22 @@ export default function LidarScanScreen({ navigation }: Props) {
   const [pending, setPending] = useState<PendingUpload | null>(null);
   const storageAlerted = useRef(false);
   const heatAlerted = useRef(false);
+  const [guide, setGuide] = useState<GuidancePayload | null>(null);
+  const [doneDismissed, setDoneDismissed] = useState(false);
+  const [size, setSize] = useState({ width: 0, height: 0 });
+  const [formatLine, setFormatLine] = useState('');
+
+  // 0.5x measurement: which cameras ARKit world tracking can run on here.
+  useEffect(() => {
+    const formats = getVideoFormats();
+    console.log('[capture] ARKit video formats', JSON.stringify(formats));
+    if (!formats.length) return;
+    const devices = Array.from(new Set(formats.map((f) => (f.device ?? '?').replace('AVCaptureDeviceTypeBuiltIn', ''))));
+    const ultra = formats.some((f) => (f.device ?? '').includes('UltraWide'));
+    setFormatLine(`ARKit 0.5x: ${ultra ? 'VAR' : 'YOK'} · ${formats.length} format · ${devices.join(', ')}`);
+  }, []);
+
+  useEffect(() => onGuidance(setGuide), []);
 
   // A scan that was captured but never reached the server -- including one
   // lost to the app being killed mid-upload -- is offered back on arrival
@@ -111,12 +131,15 @@ export default function LidarScanScreen({ navigation }: Props) {
       setBytesUsed(0);
       setStorageFull(false);
       storageAlerted.current = false;
+      setGuide(null);
+      setDoneDismissed(false);
       startLidarRecording();
       setRecording(true);
       return;
     }
 
     setRecording(false);
+    setGuide(null);
 
     if (angleCoverage < MIN_ANGLE_COVERAGE) {
       Alert.alert(
@@ -183,27 +206,45 @@ export default function LidarScanScreen({ navigation }: Props) {
   const coverageOk = angleCoverage >= MIN_ANGLE_COVERAGE;
   const storagePct = Math.min(100, Math.round((bytesUsed / ARCHIVE_BUDGET_BYTES) * 100));
   const storageColor = storageFull ? '#f87171' : storagePct > 75 ? '#eab308' : '#4ade80';
+  const guiding = recording && guide !== null;
+  const progressPct = guide ? Math.round(guide.progress * 100) : 0;
+  const showDone = guiding && !!guide?.done && !doneDismissed;
 
   return (
     <View style={styles.container}>
       <StatusBar barStyle="light-content" />
-      <View style={styles.previewWrap}>
+      <View
+        style={styles.previewWrap}
+        onLayout={(e) => setSize({ width: e.nativeEvent.layout.width, height: e.nativeEvent.layout.height })}
+      >
         {ArkitPreviewView ? <ArkitPreviewView style={StyleSheet.absoluteFill} /> : null}
+        {guiding && guide && size.width > 0 ? (
+          <GuidanceOverlay g={guide} width={size.width} height={size.height} />
+        ) : null}
 
         <View style={styles.overlay}>
           <View style={styles.topBar}>
             <Text style={styles.counter}>{frameCount} kare</Text>
-            <View style={styles.coverageRow}>
-              <View style={styles.coverageTrack}>
-                <View
-                  style={[
-                    styles.coverageFill,
-                    { width: `${coveragePct}%`, backgroundColor: coverageOk ? '#4ade80' : '#eab308' },
-                  ]}
-                />
+            {guiding ? (
+              <View style={styles.coverageRow}>
+                <View style={styles.coverageTrack}>
+                  <View style={[styles.coverageFill, { width: `${progressPct}%`, backgroundColor: '#4ade80' }]} />
+                </View>
+                <Text style={styles.coverageLabel}>%{progressPct} tamam</Text>
               </View>
-              <Text style={styles.coverageLabel}>{coveragePct}% açı</Text>
-            </View>
+            ) : (
+              <View style={styles.coverageRow}>
+                <View style={styles.coverageTrack}>
+                  <View
+                    style={[
+                      styles.coverageFill,
+                      { width: `${coveragePct}%`, backgroundColor: coverageOk ? '#4ade80' : '#eab308' },
+                    ]}
+                  />
+                </View>
+                <Text style={styles.coverageLabel}>{coveragePct}% açı</Text>
+              </View>
+            )}
 
             <View style={styles.coverageRow}>
               <View style={styles.coverageTrack}>
@@ -218,6 +259,20 @@ export default function LidarScanScreen({ navigation }: Props) {
             </View>
           </View>
 
+          {showDone ? (
+            <View style={styles.doneBanner}>
+              <Text style={styles.pendingTitle}>Bu odada her yer tarandı</Text>
+              <View style={styles.doneRow}>
+                <Pressable style={styles.doneButton} onPress={toggleRecording} disabled={busy}>
+                  <Text style={styles.buttonText}>Bitir</Text>
+                </Pressable>
+                <Pressable style={styles.doneButtonAlt} onPress={() => setDoneDismissed(true)}>
+                  <Text style={styles.buttonText}>Devam et</Text>
+                </Pressable>
+              </View>
+            </View>
+          ) : null}
+
           {pending && !recording && !busy ? (
             <Pressable style={styles.pendingBanner} onPress={() => sendArchive(pending.archivePath)}>
               <Text style={styles.pendingTitle}>Yüklenmemiş tarama var</Text>
@@ -230,7 +285,7 @@ export default function LidarScanScreen({ navigation }: Props) {
           <View style={styles.bottomBar}>
             <Text style={styles.infoText}>
               {!recording
-                ? "Telefonu normal aydınlık bir yere çevirip Başlat'a bas: pozlama o anda sabitlenir. Sonra odanın ortasında dur, göğüs / göz / diz hizasında birer tam tur dön; ardından duvar kenarından odanın içine bakarak yürü. Hep 1-3 m uzaktan bak, duvara yaklaşma."
+                ? "Telefonu göğüs hizasında, normal aydınlık bir yere çevirip Başlat'a bas: pozlama ve yükseklik o anda sabitlenir. Sonra yeşil oku takip et; telefon titrerse yüksekliğe geri dön."
                 : storageFull
                   ? 'Kayıt sınırına ulaşıldı. Durdur ve Yükle ile taramayı tamamla.'
                   : thermalState >= 3
@@ -239,10 +294,13 @@ export default function LidarScanScreen({ navigation }: Props) {
                     ? 'Telefon ısınıyor: kare hızı ve renk güncellemesi yavaşlatıldı. Mümkünse taramayı kısa tut.'
                   : tooFast
                     ? 'YAVAŞLA — telefon çok hızlı, kareler bulanık çıkıyor ve kaydedilmiyor.'
+                  : guiding && guide
+                    ? guidanceHint(guide, size.width, size.height)
                     : coverageOk
                       ? 'İyi gidiyor. Mavi ve sarı kalan yerlere 1-3 m uzaktan, başka bir noktadan bak; yaklaşmak sayılmaz.'
-                      : 'Ağ renkleri: mavi henüz iyi görülmedi, sarı 1-2 açıdan görüldü, yeşil tamam. Bir yer sarıya dönmüyorsa ona 40 cm-3 m arasından, başka bir yönden bak.'}
+                      : 'Ağ renkleri: mavi henüz iyi değil, yeşil tamam, gri LiDAR ölçemiyor (cam, ayna).'}
             </Text>
+            {!recording && formatLine ? <Text style={styles.probeText}>{formatLine}</Text> : null}
 
             <Pressable
               style={[styles.recordButton, recording && styles.recordButtonActive]}
@@ -310,4 +368,21 @@ const styles = StyleSheet.create({
   },
   recordButtonActive: { backgroundColor: '#f87171' },
   buttonText: { color: '#0e0e0e', fontWeight: '700', fontSize: 16 },
+  probeText: { color: 'rgba(255,255,255,0.55)', fontSize: 11, textAlign: 'center' },
+  doneBanner: {
+    marginHorizontal: 16,
+    padding: 14,
+    borderRadius: 12,
+    gap: 10,
+    backgroundColor: 'rgba(74,222,128,0.95)',
+  },
+  doneRow: { flexDirection: 'row', gap: 10 },
+  doneButton: { flex: 1, backgroundColor: '#fff', borderRadius: 999, paddingVertical: 10, alignItems: 'center' },
+  doneButtonAlt: {
+    flex: 1,
+    backgroundColor: 'rgba(255,255,255,0.5)',
+    borderRadius: 999,
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
 });

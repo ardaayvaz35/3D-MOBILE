@@ -3,12 +3,14 @@ import { NativeModule, requireNativeModule } from 'expo';
 import {
   ArkitCaptureModuleEvents,
   CaptureResult,
+  VideoFormat,
   WindowScanResult,
   WindowShotResult,
 } from './ArkitCapture.types';
 
 declare class ArkitCaptureModule extends NativeModule<ArkitCaptureModuleEvents> {
   isLidarSupported(): boolean;
+  getVideoFormats(): { formats: VideoFormat[] };
   startRecording(): void;
   stopRecording(): Promise<CaptureResult>;
   beginWindowScan(): void;

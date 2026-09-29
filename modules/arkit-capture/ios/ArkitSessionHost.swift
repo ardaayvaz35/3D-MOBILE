@@ -63,6 +63,27 @@ final class ArkitSessionHost: NSObject, ARSessionDelegate {
         return config
     }
 
+    /// Every video format world tracking offers on this phone, and which
+    /// physical camera each one uses. Measurement only (0.5x question): if a
+    /// row's device is the ultra wide camera, ARKit can track on 0.5x. Nothing
+    /// here changes the running configuration.
+    static func videoFormatReport() -> [[String: Any]] {
+        ARWorldTrackingConfiguration.supportedVideoFormats.map { (format) -> [String: Any] in
+            var row: [String: Any] = [
+                "width": Int(format.imageResolution.width),
+                "height": Int(format.imageResolution.height),
+                "fps": format.framesPerSecond,
+            ]
+            if #available(iOS 16.0, *) {
+                row["device"] = format.captureDeviceType.rawValue
+                row["position"] = format.captureDevicePosition.rawValue
+                row["highResRecommended"] = format.isRecommendedForHighResolutionFrameCapturing
+            }
+            print("[capture] video format \(row)")
+            return row
+        }
+    }
+
     /// True while the window pass owns the session (see WindowShotSession).
     private(set) var windowMode = false
     /// The running configuration can take full-sensor stills.

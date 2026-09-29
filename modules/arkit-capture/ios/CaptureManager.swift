@@ -47,6 +47,9 @@ class CaptureManager {
         // "the phone got hot" report is a measurement, not a guess.
         let thermalState: Int
         let processMs: Double
+        /// Bytes written for this frame (JPEG + depth + confidence), so a
+        /// sharper replacement can give them back to the budget.
+        let bytes: Int
     }
 
     struct ExportResult {
@@ -81,11 +84,29 @@ class CaptureManager {
     // user to finish. A phone that got "hot as fire" on half a room was running
     // at full rate the whole time.
     private static let hotFrameInterval: TimeInterval = 0.5
-    // Novelty: only skip frames when the phone is genuinely parked. The old
-    // 8 cm / 10 deg rule was sized for a 34 MB budget that no longer exists
-    // and at a careful 0.1 m/s walk it alone stretched spacing to ~0.8 s.
-    private static let minTranslationMeters: Float = 0.02
-    private static let minRotationRadians: Float = 2.0 * .pi / 180.0
+    // Novelty (guided capture, the user's rule): a frame is not kept when an
+    // already kept one stands within 5 cm horizontally (inside the same
+    // height band) and looks within 3 deg of it -- photo warps are near
+    // perfect up to ~3 deg, so it adds nothing. If the new one is clearly
+    // sharper it takes the old one's place instead. The earlier rule only
+    // compared with the LAST kept frame (2 cm / 2 deg), so walking back over
+    // the same spot filled the budget with copies. On 158a72c2 dropping at
+    // 3 cm / 5 deg lost 1.3% of the information; 3 deg is stricter.
+    private static let dedupMeters: Float = 0.05
+    private static let dedupHeightMeters: Float = 0.07
+    private static let dedupRadians: Float = 3.0 * .pi / 180.0
+    /// Replace only when the new frame's smear is below this share of the old.
+    private static let sharperFactor: Float = 0.7
+    private struct KeptPose {
+        let index: Int
+        var transform: simd_float4x4
+        var smear: Float
+    }
+    private var keptPoses: [KeptPose] = []
+    /// 5 cm x-z grid cell -> slots in `keptPoses`.
+    private var keptGrid: [Int64: [Int]] = [:]
+    private var replacedSharper = 0
+    private var framesInBand = 0
     // Blur. The smear in pixels is (angular speed + linear speed / distance)
     // x exposure x focal length, all known at the frame instant. 12 px of a
     // 1920 px frame at a 1/60 s exposure allows ~28 deg/s of panning, about
@@ -107,7 +128,6 @@ class CaptureManager {
     // After this many consecutive blur rejections (~60 Hz), tell the user.
     private static let tooFastAfterSkips = 30
     private var lastCaptureTime: TimeInterval = 0
-    private var lastKeptTransform: simd_float4x4?
     private var previousTransform: simd_float4x4?
     private var previousTimestamp: TimeInterval = 0
     private var blurStreak = 0
@@ -153,14 +173,18 @@ class CaptureManager {
 
     /// (frameCount, angleCoveragePct 0..1, kullanilanBayt, butceDoldu, cokHizli, isiDurumu 0..3)
     private let onFrame: (Int, Double, Int, Bool, Bool, Int) -> Void
+    private let onGuidance: ([String: Any]) -> Void
+    private var guidance: GuidanceEngine?
     private(set) var isRecording = false
     private var frameCount = 0
     private var frames: [FrameData] = []
     private var recordingStart: Date?
     private var visitedSectors = Set<Int>()
 
-    init(onFrame: @escaping (Int, Double, Int, Bool, Bool, Int) -> Void) {
+    init(onFrame: @escaping (Int, Double, Int, Bool, Bool, Int) -> Void,
+         onGuidance: @escaping ([String: Any]) -> Void) {
         self.onFrame = onFrame
+        self.onGuidance = onGuidance
     }
 
     /// Yukleme butcesinin ne kadari kullanildi (0..1).
@@ -176,13 +200,16 @@ class CaptureManager {
         imageBytesUsed = 0
         budgetReached = false
         workInFlight = false
+        replacedSharper = 0
+        framesInBand = 0
         stateLock.unlock()
         lastCaptureTime = 0
         nextIndex = 0
         skippedBusy = 0
         maxThermalState = 0
         visitedSectors.removeAll()
-        lastKeptTransform = nil
+        keptPoses.removeAll()
+        keptGrid.removeAll()
         previousTransform = nil
         previousTimestamp = 0
         skippedBlurred = 0
@@ -198,6 +225,8 @@ class CaptureManager {
         ArkitSessionHost.shared.lockExposureAndWhiteBalance()
         ArkitSessionHost.shared.coverage.reset()
         ArkitSessionHost.shared.coverageActive = true
+        guidance?.shutdown()
+        guidance = GuidanceEngine(coverage: ArkitSessionHost.shared.coverage, emit: onGuidance)
         isRecording = true
         recordingStart = Date()
         ArkitSessionHost.shared.onFrame = { [weak self] frame in
@@ -211,11 +240,17 @@ class CaptureManager {
         // files are not zipped half-written.
         workQueue.sync {}
         stateLock.lock()
-        let savedFrames = frames
+        // By index: a sharper replacement was appended at the end.
+        let savedFrames = frames.sorted { $0.index < $1.index }
         let bytesUsed = imageBytesUsed
+        let replaced = replacedSharper
+        let inBandCount = framesInBand
         stateLock.unlock()
         ArkitSessionHost.shared.unlockExposureAndWhiteBalance()
         ArkitSessionHost.shared.coverageActive = false
+        guidance?.shutdown()
+        let lockedHeight = guidance?.lockedHeight
+        guidance = nil
 
         // Grab the fused LiDAR mesh BEFORE clearing the frame sink / tearing
         // down: these ARMeshAnchors are ARKit's realtime reconstruction (the
@@ -250,17 +285,25 @@ class CaptureManager {
         print("[capture] exporting \(savedFrames.count) frames "
               + "(\(bytesUsed / 1_048_576) MB; skipped \(skippedBlurred) blurred, "
               + "\(skippedRedundant) redundant, \(skippedBusy) busy; "
+              + "\(replaced) replaced by sharper; "
               + "max thermal state \(maxThermalState))")
+
+        var stats: [String: Any] = [
+            "skipped_blurred": skippedBlurred,
+            "skipped_redundant": skippedRedundant,
+            "skipped_busy": skippedBusy,
+            "replaced_sharper": replaced,
+            "thermal_state_max": maxThermalState,
+            "guided": true,
+            "height_band_m": Double(GuidanceEngine.bandMeters),
+            "frames_in_height_band": inBandCount,
+        ]
+        if let h = lockedHeight { stats["locked_height_m"] = Double(h) }
 
         let exporter = FrameExporter()
         try exporter.export(frames: savedFrames, meshVertices: meshVertices,
                             captureDir: tempDir, to: exportURL,
-                            captureStats: [
-                                "skipped_blurred": skippedBlurred,
-                                "skipped_redundant": skippedRedundant,
-                                "skipped_busy": skippedBusy,
-                                "thermal_state_max": maxThermalState,
-                            ])
+                            captureStats: stats)
 
         return ExportResult(
             archivePath: exportURL.path,
@@ -271,6 +314,8 @@ class CaptureManager {
 
     func teardown() {
         ArkitSessionHost.shared.onFrame = nil
+        guidance?.shutdown()
+        guidance = nil
     }
 
     private func handle(frame: ARFrame) {
@@ -303,6 +348,10 @@ class CaptureManager {
 
         let thermal = ProcessInfo.processInfo.thermalState.rawValue
         maxThermalState = max(maxThermalState, thermal)
+        guidance?.update(pose: pose, time: frame.timestamp,
+                         hot: thermal >= ProcessInfo.ThermalState.serious.rawValue,
+                         focal: frame.camera.intrinsics[0][0],
+                         imageResolution: frame.camera.imageResolution)
         let (savedCount, bytesUsed, budgetFull) = snapshot()
 
         if thermal >= ProcessInfo.ThermalState.critical.rawValue {
@@ -347,12 +396,13 @@ class CaptureManager {
         }
         blurStreak = 0
 
-        // Novelty gate: measured against the last frame we KEPT, so holding
-        // the phone still consumes nothing. The first frame is always kept.
-        if let kept = lastKeptTransform {
-            let moved = simd_distance(Self.translation(kept), Self.translation(pose))
-            let turned = Self.angleBetween(kept, pose)
-            if moved < Self.minTranslationMeters && turned < Self.minRotationRadians {
+        // Novelty gate: against EVERY kept frame (see `dedupMeters`). Holding
+        // still consumes nothing; a clearly sharper copy replaces the old one.
+        var replaceSlot: Int? = nil
+        if let slot = duplicateSlot(of: pose) {
+            if smearPx < keptPoses[slot].smear * Self.sharperFactor {
+                replaceSlot = slot
+            } else {
                 skippedRedundant += 1
                 registerAngleCoverage(transform: pose)
                 // Holding still after a fast sweep must clear the warning.
@@ -368,9 +418,19 @@ class CaptureManager {
             return
         }
 
-        let index = nextIndex
-        nextIndex += 1
-        lastKeptTransform = pose
+        let index: Int
+        if let slot = replaceSlot {
+            index = keptPoses[slot].index
+            keptPoses[slot].transform = pose
+            keptPoses[slot].smear = smearPx
+            addToGrid(slot: slot, pose: pose)
+        } else {
+            index = nextIndex
+            nextIndex += 1
+            keptPoses.append(KeptPose(index: index, transform: pose, smear: smearPx))
+            addToGrid(slot: keptPoses.count - 1, pose: pose)
+        }
+        let inBand = guidance?.isInBand(pose.columns.3.y) ?? true
         lastCaptureTime = frame.timestamp
         registerAngleCoverage(transform: pose)
         let coverageNow = angleCoveragePct
@@ -395,8 +455,43 @@ class CaptureManager {
                             imageResolution: imageResolution, pose: pose,
                             timestamp: timestamp, exposureDuration: exposureDuration,
                             exposureOffset: exposureOffset, thermalState: thermal,
-                            coverage: coverageNow)
+                            coverage: coverageNow, inBand: inBand)
         }
+    }
+
+    /// Slot of a kept frame this pose would duplicate, if any.
+    private func duplicateSlot(of pose: simd_float4x4) -> Int? {
+        let p = Self.translation(pose)
+        let (gx, gz) = Self.gridCell(p)
+        for dx in -1...1 {
+            for dz in -1...1 {
+                for slot in keptGrid[Self.gridKey(gx + Int64(dx), gz + Int64(dz))] ?? [] {
+                    let kept = keptPoses[slot]
+                    let q = Self.translation(kept.transform)
+                    let flat = simd_length(simd_float2(p.x - q.x, p.z - q.z))
+                    if flat <= Self.dedupMeters, abs(p.y - q.y) <= Self.dedupHeightMeters,
+                       Self.angleBetween(kept.transform, pose) <= Self.dedupRadians {
+                        return slot
+                    }
+                }
+            }
+        }
+        return nil
+    }
+
+    /// A replaced slot is added under its new cell too; the stale entry is
+    /// harmless because the check reads the slot's current pose.
+    private func addToGrid(slot: Int, pose: simd_float4x4) {
+        let (gx, gz) = Self.gridCell(Self.translation(pose))
+        keptGrid[Self.gridKey(gx, gz), default: []].append(slot)
+    }
+
+    private static func gridCell(_ p: simd_float3) -> (Int64, Int64) {
+        (Int64((p.x / dedupMeters).rounded(.down)), Int64((p.z / dedupMeters).rounded(.down)))
+    }
+
+    private static func gridKey(_ x: Int64, _ z: Int64) -> Int64 {
+        ((x & 0xFFFFFFFF) << 32) | (z & 0xFFFFFFFF)
     }
 
     /// Runs on `workQueue`. Encodes and writes one frame, then reports it.
@@ -404,7 +499,8 @@ class CaptureManager {
                             confidenceMap: CVPixelBuffer?, fullIntrinsics: simd_float3x3,
                             imageResolution: CGSize, pose: simd_float4x4,
                             timestamp: TimeInterval, exposureDuration: Double,
-                            exposureOffset: Float, thermalState: Int, coverage: Double) {
+                            exposureOffset: Float, thermalState: Int, coverage: Double,
+                            inBand: Bool) {
         let started = CACurrentMediaTime()
         let rgbImage = CIImage(cvPixelBuffer: pixelBuffer)
 
@@ -492,13 +588,23 @@ class CaptureManager {
             confidenceMap: confidenceMap,
             intrinsics: fullIntrinsics,
             imageResolution: imageResolution,
-            cameraTransform: pose
+            cameraTransform: pose,
+            countsAngles: inBand
         )
 
         let processMs = (CACurrentMediaTime() - started) * 1000
         stateLock.lock()
         imageBytesUsed += bytesWritten
-        frameCount += 1
+        // A sharper replacement overwrote the old frame's files (same index):
+        // give back its bytes and take its place in the list.
+        if let old = frames.firstIndex(where: { $0.index == index }) {
+            imageBytesUsed -= frames[old].bytes
+            frames.remove(at: old)
+            replacedSharper += 1
+        } else {
+            frameCount += 1
+            if inBand { framesInBand += 1 }
+        }
         frames.append(FrameData(
             index: index,
             timestamp: timestamp,
@@ -514,7 +620,8 @@ class CaptureManager {
             exposureDuration: exposureDuration,
             exposureOffset: exposureOffset,
             thermalState: thermalState,
-            processMs: processMs
+            processMs: processMs,
+            bytes: bytesWritten
         ))
         let countNow = frameCount
         let bytesNow = imageBytesUsed

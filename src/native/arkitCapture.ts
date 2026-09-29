@@ -2,12 +2,15 @@ import type React from 'react';
 import type {
   CaptureResult,
   FrameCapturedPayload,
+  GuidancePayload,
+  VideoFormat,
   WindowScanResult,
   WindowShotResult,
 } from '../../modules/arkit-capture/src/ArkitCapture.types';
 
 type NativeModuleShape = {
   isLidarSupported(): boolean;
+  getVideoFormats(): { formats: VideoFormat[] };
   startRecording(): void;
   stopRecording(): Promise<CaptureResult>;
   beginWindowScan(): void;
@@ -18,6 +21,10 @@ type NativeModuleShape = {
   addListener(
     eventName: 'onFrameCaptured',
     listener: (payload: FrameCapturedPayload) => void
+  ): { remove: () => void };
+  addListener(
+    eventName: 'onGuidance',
+    listener: (payload: GuidancePayload) => void
   ): { remove: () => void };
 };
 
@@ -71,6 +78,23 @@ export function onFrameCaptured(listener: (payload: FrameCapturedPayload) => voi
   if (!nativeModule) return () => {};
   const subscription = nativeModule.addListener('onFrameCaptured', listener);
   return () => subscription.remove();
+}
+
+/** Live target arrow and height lock, ~10 times a second while recording. */
+export function onGuidance(listener: (payload: GuidancePayload) => void): () => void {
+  if (!nativeModule) return () => {};
+  const subscription = nativeModule.addListener('onGuidance', listener);
+  return () => subscription.remove();
+}
+
+/** Video formats ARKit world tracking offers, with the camera each uses (0.5x check). */
+export function getVideoFormats(): VideoFormat[] {
+  if (!nativeModule?.getVideoFormats) return [];
+  try {
+    return nativeModule.getVideoFormats().formats ?? [];
+  } catch {
+    return [];
+  }
 }
 
 function requireModule(): NativeModuleShape {

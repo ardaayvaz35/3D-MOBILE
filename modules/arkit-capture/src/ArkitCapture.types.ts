@@ -1,5 +1,6 @@
 export type ArkitCaptureModuleEvents = {
   onFrameCaptured: (payload: FrameCapturedPayload) => void;
+  onGuidance: (payload: GuidancePayload) => void;
 };
 
 export type FrameCapturedPayload = {
@@ -50,4 +51,41 @@ export type WindowScanResult = {
   /** JPEG files in the archive (shotCount x 3 exposures). */
   photoCount: number;
   shotCount: number;
+};
+
+/** A direction in portrait screen terms (unit vector, camera frame). */
+export type ScreenDirection = { right: number; up: number; forward: number };
+
+export type GuidancePayload = {
+  /** explore: look where nobody looked yet; improve: fill missing visitor
+   *  angles; walk: nothing left from here, walk on; wait: not enough data. */
+  mode: 'explore' | 'improve' | 'walk' | 'wait';
+  target?: ScreenDirection;
+  walk?: ScreenDirection;
+  walkMeters?: number;
+  /** Camera on target (within 10 deg) and height in band. */
+  aligned: boolean;
+  /** 0..1 of the 1 s hold that completes the target. */
+  hold: number;
+  /** Share of visitor angles already served, 0..1. */
+  progress: number;
+  /** "Every place is scanned" -- offer to finish. */
+  done: boolean;
+  /** Metres above (+) or below (-) the height locked at start. */
+  heightDeviation: number;
+  inBand: boolean;
+  buzzing: boolean;
+  /** Full-image focal length (px) and sensor-landscape image size. */
+  focal: number;
+  imageWidth: number;
+  imageHeight: number;
+};
+
+export type VideoFormat = {
+  width: number;
+  height: number;
+  fps: number;
+  device?: string;
+  position?: number;
+  highResRecommended?: boolean;
 };
