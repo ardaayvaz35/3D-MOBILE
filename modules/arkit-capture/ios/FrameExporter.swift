@@ -17,7 +17,12 @@ class FrameExporter {
                 meshVertices: [simd_float3] = [],
                 captureDir: URL,
                 to url: URL,
-                captureStats: [String: Any] = [:]) throws {
+                captureStats: [String: Any] = [:],
+                segments: [[String: Any]] = [],
+                vistas: [[String: Any]] = [],
+                openingsHint: [String: Any]? = nil,
+                openingFaces: [[Float]] = [],
+                faceClasses: [String: String] = [:]) throws {
         let workDir = captureDir
         try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
 
@@ -74,6 +79,7 @@ class FrameExporter {
                 // 0 nominal .. 3 critical, and ms spent saving the frame.
                 "thermal_state": frame.thermalState,
                 "process_ms": (frame.processMs * 10).rounded() / 10,
+                "segment": frame.segment,
             ])
         }
 
@@ -91,12 +97,25 @@ class FrameExporter {
                 "duration_seconds": round((frames.last?.timestamp ?? 0) - (frames.first?.timestamp ?? 0)),
         ]
         for (key, value) in captureStats { summary[key] = value }
-        let metadata: [String: Any] = [
+        var metadata: [String: Any] = [
             "frames": frameMetas,
             "client_type": "ios_lidar",
             "mesh_path": meshName,
             "metadata": summary,
         ]
+        if !segments.isEmpty { metadata["segments"] = segments }
+        if !vistas.isEmpty { metadata["vistas"] = vistas }
+        if openingsHint != nil || !openingFaces.isEmpty {
+            // The screen's live list (corners, exterior vote, vista) plus the
+            // raw ARKit window/door faces it was built from.
+            var hint = openingsHint ?? ["version": 1, "space": "arkit_world", "openings": []]
+            hint["face_columns"] = ["cx", "cy", "cz", "nx", "ny", "nz", "area_m2", "class"]
+            hint["face_classes"] = faceClasses
+            hint["faces"] = openingFaces
+            let data = try JSONSerialization.data(withJSONObject: hint)
+            try data.write(to: workDir.appendingPathComponent("openings_hint.json"))
+            metadata["openings_hint_path"] = "openings_hint.json"
+        }
 
         let metaJSON = workDir.appendingPathComponent("metadata.json")
         let jsonData = try JSONSerialization.data(withJSONObject: metadata, options: .prettyPrinted)

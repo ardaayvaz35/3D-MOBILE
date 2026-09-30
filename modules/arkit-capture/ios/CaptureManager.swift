@@ -50,6 +50,8 @@ class CaptureManager {
         /// Bytes written for this frame (JPEG + depth + confidence), so a
         /// sharper replacement can give them back to the budget.
         let bytes: Int
+        /// Exposure segment the frame was taken in (0 = room, spec §4).
+        let segment: Int
     }
 
     struct ExportResult {
@@ -181,10 +183,31 @@ class CaptureManager {
     private var recordingStart: Date?
     private var visitedSectors = Set<Int>()
 
+    // Exposure segments (spec §4): 0 is the room, locked at start. Going out
+    // meters and locks a new exposure; coming back re-applies the room's.
+    private var segments: [[String: Any]] = []
+    private var currentSegment = 0
+    private var roomExposure: ArkitSessionHost.LockedExposure?
+    private var segmentExposure: ArkitSessionHost.LockedExposure?
+    /// Frames are not kept while a vista pass or a re-metering runs: their
+    /// exposure is not the segment's.
+    private var framesPaused = false
+    private var vista: WindowShotSession?
+    private var vistaInfo: [String: Any] = [:]
+    private var vistas: [[String: Any]] = []
+    private var vistaCount = 0
+    private var controlCount = 0
+    private var lastPoseEmit: TimeInterval = 0
+    /// Live openings as the screen last saw them (openings_hint.json body).
+    private var openingsHint: [String: Any]?
+    private let onPose: ([String: Any]) -> Void
+
     init(onFrame: @escaping (Int, Double, Int, Bool, Bool, Int) -> Void,
-         onGuidance: @escaping ([String: Any]) -> Void) {
+         onGuidance: @escaping ([String: Any]) -> Void,
+         onPose: @escaping ([String: Any]) -> Void) {
         self.onFrame = onFrame
         self.onGuidance = onGuidance
+        self.onPose = onPose
     }
 
     /// Yukleme butcesinin ne kadari kullanildi (0..1).
@@ -223,6 +246,18 @@ class CaptureManager {
         // Before the first frame is taken, so every kept frame shares one
         // exposure and one white balance. See lockExposureAndWhiteBalance().
         ArkitSessionHost.shared.lockExposureAndWhiteBalance()
+        segments.removeAll()
+        vistas.removeAll()
+        vista = nil
+        vistaCount = 0
+        controlCount = 0
+        framesPaused = false
+        currentSegment = 0
+        openingsHint = nil
+        // Read once the first frames flow (recordRoomExposureIfNeeded): the
+        // lock needs a moment to report its final values.
+        roomExposure = nil
+        segmentExposure = nil
         ArkitSessionHost.shared.coverage.reset()
         ArkitSessionHost.shared.coverageActive = true
         guidance?.shutdown()
@@ -235,6 +270,7 @@ class CaptureManager {
     }
 
     func stopRecordingAndExport() throws -> ExportResult {
+        if vista != nil { _ = try? endVista(openingIds: []) }
         isRecording = false
         // Let the frame being written finish, so it is in the archive and its
         // files are not zipped half-written.
@@ -259,6 +295,8 @@ class CaptureManager {
         let meshVertices = Self.extractWorldVertices(
             from: ArkitSessionHost.shared.currentMeshAnchors()
         )
+
+        let openingFaces = Self.extractOpeningFaces(from: ArkitSessionHost.shared.currentMeshAnchors())
 
         ArkitSessionHost.shared.onFrame = nil
 
@@ -303,7 +341,14 @@ class CaptureManager {
         let exporter = FrameExporter()
         try exporter.export(frames: savedFrames, meshVertices: meshVertices,
                             captureDir: tempDir, to: exportURL,
-                            captureStats: stats)
+                            captureStats: stats,
+                            segments: segments, vistas: vistas,
+                            openingsHint: openingsHint,
+                            openingFaces: openingFaces,
+                            faceClasses: [
+                                String(ARMeshClassification.window.rawValue): "window",
+                                String(ARMeshClassification.door.rawValue): "door",
+                            ])
 
         return ExportResult(
             archivePath: exportURL.path,
@@ -318,8 +363,132 @@ class CaptureManager {
         guidance = nil
     }
 
+    // MARK: - Exposure segments (spec §4)
+
+    private func recordRoomExposureIfNeeded() {
+        guard roomExposure == nil, let e = ArkitSessionHost.shared.readLockedExposure() else { return }
+        roomExposure = e
+        segmentExposure = e
+        segments = [Self.segmentEntry(id: 0, outdoor: false, e)]
+    }
+
+    private static func segmentEntry(id: Int, outdoor: Bool, _ e: ArkitSessionHost.LockedExposure) -> [String: Any] {
+        [
+            "id": id,
+            "kind": outdoor ? "outdoor" : "indoor",
+            "exposure_duration": e.duration.seconds,
+            "iso": e.iso,
+            "wb_gains": [e.gains.redGain, e.gains.greenGain, e.gains.blueGain],
+        ]
+    }
+
+    /// Camera pose ~10 times a second for the whole recording: the screen
+    /// draws the openings, notices walking through a door and steers the
+    /// vista pass with it.
+    private func emitPose(_ frame: ARFrame) {
+        guard frame.timestamp - lastPoseEmit >= 0.1 else { return }
+        lastPoseEmit = frame.timestamp
+        let m = frame.camera.transform
+        var normal = false
+        if case .normal = frame.camera.trackingState { normal = true }
+        onPose([
+            "transform": (0..<4).flatMap { c in (0..<4).map { r in Double(m[c][r]) } },
+            "focal": Double(frame.camera.intrinsics[0][0]),
+            "imageWidth": Double(frame.camera.imageResolution.width),
+            "imageHeight": Double(frame.camera.imageResolution.height),
+            "trackingNormal": normal,
+            "segment": currentSegment,
+            "paused": framesPaused,
+        ])
+    }
+
+    /// Outdoor: meter for a second, then lock and start a new segment.
+    /// Indoor: re-apply the room's exposure exactly and start a new segment.
+    func beginSegment(outdoor: Bool, completion: @escaping (Int) -> Void) {
+        framesPaused = true
+        let finish: (ArkitSessionHost.LockedExposure?) -> Void = { e in
+            let id = self.segments.count
+            if let e = e {
+                self.segmentExposure = e
+                self.segments.append(Self.segmentEntry(id: id, outdoor: outdoor, e))
+            }
+            self.currentSegment = id
+            self.framesPaused = false
+            completion(id)
+        }
+        if outdoor {
+            ArkitSessionHost.shared.beginMetering()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                ArkitSessionHost.shared.lockExposureAndWhiteBalance()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    finish(ArkitSessionHost.shared.readLockedExposure())
+                }
+            }
+        } else if let room = roomExposure {
+            ArkitSessionHost.shared.applyLockedExposure(room)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { finish(room) }
+        } else {
+            finish(nil)
+        }
+    }
+
+    /// The screen's live openings list, written as openings_hint.json.
+    func setOpeningsHint(_ hint: [String: Any]) {
+        openingsHint = hint
+    }
+
+    // MARK: - Vista pass (spec §4)
+
+    func startVista(role: String) -> String {
+        if vista != nil { _ = try? endVista(openingIds: []) }
+        let id: String
+        if role == "control" {
+            controlCount += 1
+            id = "c\(controlCount)"
+        } else {
+            vistaCount += 1
+            id = "v\(vistaCount)"
+        }
+        framesPaused = true
+        ArkitSessionHost.shared.beginMetering()
+        let dir = tempDir.appendingPathComponent("vistas").appendingPathComponent(id)
+        vista = WindowShotSession(into: dir, vistaId: id, role: role)
+        vistaInfo = ["id": id, "role": role, "path": "vistas/\(id)/shots.json", "segment": currentSegment]
+        return id
+    }
+
+    /// One target: three exposures. Resolves the group count and whether all
+    /// three had normal tracking (if not, the screen asks for the target again).
+    func captureVistaShot(completion: @escaping (Result<(Int, Bool), Error>) -> Void) {
+        guard let v = vista else {
+            completion(.failure(NSError(domain: "Vista", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Manzara modu açık değil"])))
+            return
+        }
+        v.captureGroup { result in
+            completion(result.map { ($0, v.lastGroupTrackingNormal) })
+        }
+    }
+
+    /// Writes shots.json, restores the segment's locked exposure, resumes frames.
+    func endVista(openingIds: [String]) throws -> Int {
+        guard let v = vista else { return 0 }
+        vista = nil
+        let groups = try v.finishInPlace(openingIds: openingIds)
+        var info = vistaInfo
+        info["groups"] = groups
+        info["opening_ids"] = openingIds
+        if groups > 0 { vistas.append(info) }
+        if let e = segmentExposure { ArkitSessionHost.shared.applyLockedExposure(e) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.framesPaused = false }
+        return groups
+    }
+
     private func handle(frame: ARFrame) {
         guard isRecording else { return }
+        recordRoomExposureIfNeeded()
+        emitPose(frame)
+        if framesPaused { return }
 
         // Require an active LiDAR depth frame: it is the cheapest available
         // proof that tracking is healthy this instant, and it is data we keep
@@ -447,6 +616,7 @@ class CaptureManager {
         let exposureDuration = frame.camera.exposureDuration
         let exposureOffset = frame.camera.exposureOffset
 
+        let segmentNow = currentSegment
         workQueue.async { [weak self] in
             guard let self = self else { return }
             defer { self.endWork() }
@@ -455,7 +625,7 @@ class CaptureManager {
                             imageResolution: imageResolution, pose: pose,
                             timestamp: timestamp, exposureDuration: exposureDuration,
                             exposureOffset: exposureOffset, thermalState: thermal,
-                            coverage: coverageNow, inBand: inBand)
+                            coverage: coverageNow, inBand: inBand, segment: segmentNow)
         }
     }
 
@@ -500,7 +670,7 @@ class CaptureManager {
                             imageResolution: CGSize, pose: simd_float4x4,
                             timestamp: TimeInterval, exposureDuration: Double,
                             exposureOffset: Float, thermalState: Int, coverage: Double,
-                            inBand: Bool) {
+                            inBand: Bool, segment: Int) {
         let started = CACurrentMediaTime()
         let rgbImage = CIImage(cvPixelBuffer: pixelBuffer)
 
@@ -621,7 +791,8 @@ class CaptureManager {
             exposureOffset: exposureOffset,
             thermalState: thermalState,
             processMs: processMs,
-            bytes: bytesWritten
+            bytes: bytesWritten,
+            segment: segment
         ))
         let countNow = frameCount
         let bytesNow = imageBytesUsed
@@ -694,6 +865,46 @@ class CaptureManager {
     }
 
     // MARK: - Mesh extraction
+
+    /// Window and door faces of the classified mesh, world space:
+    /// [cx, cy, cz, nx, ny, nz, area_m2, class], class = ARMeshClassification
+    /// raw value (the export writes the window/door numbers next to the data).
+    /// For measuring how well ARKit finds glass (spec §8).
+    static func extractOpeningFaces(from anchors: [ARMeshAnchor]) -> [[Float]] {
+        var out: [[Float]] = []
+        let window = UInt8(ARMeshClassification.window.rawValue)
+        let door = UInt8(ARMeshClassification.door.rawValue)
+        for anchor in anchors {
+            let g = anchor.geometry
+            guard let cls = g.classification else { continue }
+            let faces = g.faces
+            let vtx = g.vertices
+            let vbase = vtx.buffer.contents()
+            let fbase = faces.buffer.contents()
+            let cbase = cls.buffer.contents()
+            func vertex(_ i: Int) -> simd_float3 {
+                let p = vbase.advanced(by: vtx.offset + i * vtx.stride)
+                    .assumingMemoryBound(to: (Float, Float, Float).self).pointee
+                let w = anchor.transform * simd_float4(p.0, p.1, p.2, 1)
+                return simd_float3(w.x, w.y, w.z)
+            }
+            for f in 0..<faces.count {
+                let c = cbase.advanced(by: cls.offset + f * cls.stride)
+                    .assumingMemoryBound(to: UInt8.self).pointee
+                guard c == window || c == door else { continue }
+                let ip = fbase.advanced(by: f * faces.indexCountPerPrimitive * faces.bytesPerIndex)
+                    .assumingMemoryBound(to: UInt32.self)
+                let a = vertex(Int(ip[0])), b = vertex(Int(ip[1])), d = vertex(Int(ip[2]))
+                let n = simd_cross(b - a, d - a)
+                let area = simd_length(n) / 2
+                guard area > 0 else { continue }
+                let nn = simd_normalize(n)
+                let cen = (a + b + d) / 3
+                out.append([cen.x, cen.y, cen.z, nn.x, nn.y, nn.z, area, Float(c)])
+            }
+        }
+        return out
+    }
 
     /// Flatten every ARMeshAnchor's vertices into a single world-space point
     /// list. Each anchor stores vertices in its own local frame; multiply by
