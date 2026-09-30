@@ -14,6 +14,8 @@ import {
 } from '../native/arkitCapture';
 import type { GuidancePayload } from '../../modules/arkit-capture/src/ArkitCapture.types';
 import GuidanceOverlay, { guidanceHint } from './GuidanceOverlay';
+import OpeningsOverlay from './OpeningsOverlay';
+import { useVistaCapture } from '../capture/useVistaCapture';
 import { uploadCapture } from '../api/captures';
 import {
   clearPendingUpload,
@@ -50,6 +52,10 @@ export default function LidarScanScreen({ navigation }: Props) {
   const [doneDismissed, setDoneDismissed] = useState(false);
   const [size, setSize] = useState({ width: 0, height: 0 });
   const [formatLine, setFormatLine] = useState('');
+  const wrapRef = useRef<View>(null);
+  const wrapOffset = useRef({ x: 0, y: 0 });
+  // Openings, outdoor segment and vista pass (spec 2026-09-30-pencere-manzara-design.md §4).
+  const v = useVistaCapture(recording, size);
 
   // 0.5x measurement: which cameras ARKit world tracking can run on here.
   useEffect(() => {
@@ -133,6 +139,7 @@ export default function LidarScanScreen({ navigation }: Props) {
       storageAlerted.current = false;
       setGuide(null);
       setDoneDismissed(false);
+      v.reset();
       startLidarRecording();
       setRecording(true);
       return;
@@ -141,6 +148,22 @@ export default function LidarScanScreen({ navigation }: Props) {
     setRecording(false);
     setGuide(null);
 
+    // Every opening that looks out needs its vista; say which ones are missing.
+    if (v.missing.length > 0) {
+      Alert.alert(
+        'Manzara eksik',
+        `${v.missing.join(', ')} için manzara çekilmedi. Camın ya da balkonun önünde "Manzara çek"e bas. Yine de bitirmek ister misin?`,
+        [
+          { text: 'Geri dön', style: 'cancel', onPress: () => setRecording(true) },
+          { text: 'Yine de bitir', style: 'destructive', onPress: () => checkCoverageAndFinish() },
+        ]
+      );
+      return;
+    }
+    await checkCoverageAndFinish();
+  };
+
+  const checkCoverageAndFinish = async () => {
     if (angleCoverage < MIN_ANGLE_COVERAGE) {
       Alert.alert(
         'Az açıdan tarandı',
@@ -160,6 +183,7 @@ export default function LidarScanScreen({ navigation }: Props) {
   const finishAndUpload = async () => {
     setBusy(true);
     try {
+      await v.prepareStop();
       const result = await stopLidarRecording();
       // Record the archive BEFORE uploading. Everything after this point can
       // fail or be killed by the OS, and without this the scan would be
@@ -214,12 +238,38 @@ export default function LidarScanScreen({ navigation }: Props) {
     <View style={styles.container}>
       <StatusBar barStyle="light-content" />
       <View
+        ref={wrapRef}
         style={styles.previewWrap}
-        onLayout={(e) => setSize({ width: e.nativeEvent.layout.width, height: e.nativeEvent.layout.height })}
+        onLayout={(e) => {
+          setSize({ width: e.nativeEvent.layout.width, height: e.nativeEvent.layout.height });
+          wrapRef.current?.measureInWindow((x, y) => {
+            wrapOffset.current = { x, y };
+          });
+        }}
+        // Taps on the empty preview: metering during a vista pass, corners
+        // while adding an opening. Buttons answer first; page coordinates
+        // because locationX is relative to whichever child was touched.
+        onStartShouldSetResponder={() => v.tapsActive}
+        onResponderRelease={(e) =>
+          v.onTap(e.nativeEvent.pageX - wrapOffset.current.x, e.nativeEvent.pageY - wrapOffset.current.y)
+        }
       >
         {ArkitPreviewView ? <ArkitPreviewView style={StyleSheet.absoluteFill} /> : null}
-        {guiding && guide && size.width > 0 ? (
+        {recording && !v.vistaRole && v.pose && size.width > 0 ? (
+          <OpeningsOverlay
+            pose={v.pose}
+            openings={v.openings}
+            names={v.names}
+            taps={v.addTaps}
+            width={size.width}
+            height={size.height}
+          />
+        ) : null}
+        {!v.vistaRole && !v.addTaps && guiding && guide && size.width > 0 ? (
           <GuidanceOverlay g={guide} width={size.width} height={size.height} />
+        ) : null}
+        {v.vistaGuide && size.width > 0 ? (
+          <GuidanceOverlay g={v.vistaGuide} width={size.width} height={size.height} />
         ) : null}
 
         <View style={styles.overlay}>
@@ -284,7 +334,17 @@ export default function LidarScanScreen({ navigation }: Props) {
 
           <View style={styles.bottomBar}>
             <Text style={styles.infoText}>
-              {!recording
+              {v.vistaRole === 'vista'
+                ? `Manzara: ${v.vistaDone}/${v.vistaTotal || '…'} nokta. Dışarıda bir binaya dokun (pozlama), sonra çerçeveyi noktaya getirip sabit tut.`
+                : v.vistaRole === 'control'
+                  ? `Kontrol fotoğrafı: ${v.vistaDone}. Balkonun bir ucuna ya da cam önüne geç, dışarıya çevir, Çek'e bas.`
+                  : v.addTaps
+                    ? `Açıklık ekle: çerçevenin 4 köşesine sırayla dokun (${v.addTaps.length}/4).`
+                    : v.segmentBusy
+                      ? 'Pozlama ayarlanıyor, bir saniye sabit tut…'
+                      : v.outdoor && recording
+                        ? 'Dışarıdasın (ayrı pozlama). Zemini ve korkuluğu tara, sonra dönüp cepheyi tara.'
+                        : !recording
                 ? "Telefonu göğüs hizasında, normal aydınlık bir yere çevirip Başlat'a bas: pozlama ve yükseklik o anda sabitlenir. Sonra yeşil oku takip et; telefon titrerse yüksekliğe geri dön."
                 : storageFull
                   ? 'Kayıt sınırına ulaşıldı. Durdur ve Yükle ile taramayı tamamla.'
@@ -300,12 +360,40 @@ export default function LidarScanScreen({ navigation }: Props) {
                       ? 'İyi gidiyor. Mavi ve sarı kalan yerlere 1-3 m uzaktan, başka bir noktadan bak; yaklaşmak sayılmaz.'
                       : 'Ağ renkleri: mavi henüz iyi değil, yeşil tamam, gri LiDAR ölçemiyor (cam, ayna).'}
             </Text>
+            {recording && !v.vistaRole && !v.addTaps ? (
+              <View style={styles.actionRow}>
+                <Pressable style={styles.smallButton} onPress={v.toggleOutdoor} disabled={v.segmentBusy || busy}>
+                  <Text style={styles.smallText}>{v.outdoor ? 'İçeri giriyorum' : 'Dışarı çıkıyorum'}</Text>
+                </Pressable>
+                <Pressable style={styles.smallButton} onPress={() => v.openVista('vista')} disabled={busy}>
+                  <Text style={styles.smallText}>Manzara çek</Text>
+                </Pressable>
+                <Pressable style={styles.smallButton} onPress={() => v.openVista('control')} disabled={busy}>
+                  <Text style={styles.smallText}>Kontrol foto</Text>
+                </Pressable>
+                <Pressable style={styles.smallButton} onPress={v.startAdd} disabled={busy}>
+                  <Text style={styles.smallText}>Açıklık ekle</Text>
+                </Pressable>
+              </View>
+            ) : null}
+            {v.vistaRole || v.addTaps ? (
+              <View style={styles.actionRow}>
+                {v.vistaRole === 'control' ? (
+                  <Pressable style={styles.smallButton} onPress={v.shootControl}>
+                    <Text style={styles.smallText}>Çek</Text>
+                  </Pressable>
+                ) : null}
+                <Pressable style={styles.smallButton} onPress={v.vistaRole ? v.closeVista : v.cancelAdd}>
+                  <Text style={styles.smallText}>{v.vistaRole ? 'Bitti' : 'Vazgeç'}</Text>
+                </Pressable>
+              </View>
+            ) : null}
             {!recording && formatLine ? <Text style={styles.probeText}>{formatLine}</Text> : null}
 
             <Pressable
               style={[styles.recordButton, recording && styles.recordButtonActive]}
               onPress={toggleRecording}
-              disabled={busy}
+              disabled={busy || v.vistaRole !== null || v.segmentBusy}
             >
               {busy ? (
                 <ActivityIndicator color="#fff" />
@@ -377,6 +465,14 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(74,222,128,0.95)',
   },
   doneRow: { flexDirection: 'row', gap: 10 },
+  actionRow: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 8 },
+  smallButton: {
+    backgroundColor: 'rgba(255,255,255,0.88)',
+    borderRadius: 999,
+    paddingVertical: 9,
+    paddingHorizontal: 13,
+  },
+  smallText: { color: '#0e0e0e', fontWeight: '700', fontSize: 13 },
   doneButton: { flex: 1, backgroundColor: '#fff', borderRadius: 999, paddingVertical: 10, alignItems: 'center' },
   doneButtonAlt: {
     flex: 1,

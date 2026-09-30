@@ -3,7 +3,9 @@ import type {
   CaptureResult,
   FrameCapturedPayload,
   GuidancePayload,
+  PosePayload,
   VideoFormat,
+  VistaShotResult,
   WindowScanResult,
   WindowShotResult,
 } from '../../modules/arkit-capture/src/ArkitCapture.types';
@@ -18,6 +20,15 @@ type NativeModuleShape = {
   captureWindowShot(): Promise<WindowShotResult>;
   finishWindowScan(): Promise<WindowScanResult>;
   cancelWindowScan(): void;
+  beginSegment(outdoor: boolean): Promise<number>;
+  classifiedPoints(): Promise<number[]>;
+  sampleLuma(points: number[]): number[];
+  raycast(x: number, y: number, viewW: number, viewH: number): number[] | null;
+  setOpeningsHint(json: string): void;
+  startVista(role: string): string;
+  captureVistaShot(): Promise<VistaShotResult>;
+  endVista(openingIds: string[]): Promise<number>;
+  addListener(eventName: 'onPose', listener: (payload: PosePayload) => void): { remove: () => void };
   addListener(
     eventName: 'onFrameCaptured',
     listener: (payload: FrameCapturedPayload) => void
@@ -125,6 +136,51 @@ export function finishWindowScan(): Promise<WindowScanResult> {
 
 export function cancelWindowScan(): void {
   nativeModule?.cancelWindowScan();
+}
+
+/** New exposure segment: outdoor meters and locks, indoor restores the room's. */
+export function beginSegment(outdoor: boolean): Promise<number> {
+  return requireModule().beginSegment(outdoor);
+}
+
+/** Window / door / floor points of the classified mesh, flat [x, y, z, cls, ...]. */
+export function classifiedPoints(): Promise<number[]> {
+  return requireModule().classifiedPoints();
+}
+
+/** Luma 0..255 of the current camera image at world points (flat x, y, z), -1 out of view. */
+export function sampleLuma(points: number[]): number[] {
+  return requireModule().sampleLuma(points);
+}
+
+/** World point under a tap on the preview (x, y in 0..1 of a viewW x viewH view). */
+export function raycast(x: number, y: number, viewW: number, viewH: number): number[] | null {
+  return requireModule().raycast(x, y, viewW, viewH);
+}
+
+/** Live openings list, written into the archive as openings_hint.json. */
+export function setOpeningsHint(hint: object): void {
+  requireModule().setOpeningsHint(JSON.stringify(hint));
+}
+
+/** Pauses frame recording and starts a vista (or control) photo set. */
+export function startVista(role: 'vista' | 'control'): string {
+  return requireModule().startVista(role);
+}
+
+export function captureVistaShot(): Promise<VistaShotResult> {
+  return requireModule().captureVistaShot();
+}
+
+/** Closes the photo set, restores the segment exposure, resumes frames. */
+export function endVista(openingIds: string[]): Promise<number> {
+  return requireModule().endVista(openingIds);
+}
+
+export function onPose(listener: (payload: PosePayload) => void): () => void {
+  if (!nativeModule) return () => {};
+  const subscription = nativeModule.addListener('onPose', listener);
+  return () => subscription.remove();
 }
 
 export const ArkitPreviewView = PreviewViewComponent;

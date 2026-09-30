@@ -1,6 +1,7 @@
 export type ArkitCaptureModuleEvents = {
   onFrameCaptured: (payload: FrameCapturedPayload) => void;
   onGuidance: (payload: GuidancePayload) => void;
+  onPose: (payload: PosePayload) => void;
 };
 
 export type FrameCapturedPayload = {
@@ -88,4 +89,24 @@ export type VideoFormat = {
   device?: string;
   position?: number;
   highResRecommended?: boolean;
+};
+
+/** Camera pose ~10 times a second while recording. */
+export type PosePayload = {
+  /** ARKit camera-to-world, column-major, 16 numbers. */
+  transform: number[];
+  focal: number;
+  imageWidth: number;
+  imageHeight: number;
+  trackingNormal: boolean;
+  /** Exposure segment frames are being recorded in (0 = room). */
+  segment: number;
+  /** Frames are not being kept (vista pass or re-metering). */
+  paused: boolean;
+};
+
+export type VistaShotResult = {
+  shotCount: number;
+  /** All three exposures had normal tracking; if not, ask for the target again. */
+  trackingNormal: boolean;
 };

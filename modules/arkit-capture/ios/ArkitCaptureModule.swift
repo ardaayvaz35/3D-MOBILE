@@ -8,7 +8,7 @@ public class ArkitCaptureModule: Module {
   public func definition() -> ModuleDefinition {
     Name("ArkitCapture")
 
-    Events("onFrameCaptured", "onTrackingStateChanged", "onGuidance")
+    Events("onFrameCaptured", "onTrackingStateChanged", "onGuidance", "onPose")
 
     Function("isLidarSupported") { () -> Bool in
       ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
@@ -33,6 +33,8 @@ public class ArkitCaptureModule: Module {
           ])
         }, onGuidance: { payload in
           self.sendEvent("onGuidance", payload)
+        }, onPose: { payload in
+          self.sendEvent("onPose", payload)
         })
       }
       self.captureManager?.startRecording()
@@ -55,6 +57,63 @@ public class ArkitCaptureModule: Module {
           ])
         } catch {
           promise.reject("EXPORT_FAILED", error.localizedDescription)
+        }
+      }
+    }
+
+    // Exposure segments, live openings and the vista pass, inside a running
+    // recording (spec 2026-09-30-pencere-manzara-design.md §4).
+    AsyncFunction("beginSegment") { (outdoor: Bool, promise: Promise) in
+      guard let m = self.captureManager else {
+        promise.reject("NO_SESSION", "Recording was not started"); return
+      }
+      DispatchQueue.main.async { m.beginSegment(outdoor: outdoor) { id in promise.resolve(id) } }
+    }
+
+    AsyncFunction("classifiedPoints") { (promise: Promise) in
+      DispatchQueue.global(qos: .utility).async {
+        promise.resolve(ArkitSessionHost.shared.classifiedPoints().map { Double($0) })
+      }
+    }
+
+    Function("sampleLuma") { (points: [Double]) -> [Int] in
+      ArkitSessionHost.shared.sampleLuma(points)
+    }
+
+    Function("raycast") { (x: Double, y: Double, viewW: Double, viewH: Double) -> [Double]? in
+      ArkitSessionHost.shared.raycast(x: x, y: y, viewW: viewW, viewH: viewH)?.map { Double($0) }
+    }
+
+    Function("setOpeningsHint") { (json: String) -> Void in
+      guard let data = json.data(using: .utf8),
+            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+      self.captureManager?.setOpeningsHint(obj)
+    }
+
+    Function("startVista") { (role: String) -> String in
+      guard let m = self.captureManager else { return "" }
+      return m.startVista(role: role)
+    }
+
+    AsyncFunction("captureVistaShot") { (promise: Promise) in
+      guard let m = self.captureManager else {
+        promise.reject("NO_SESSION", "Recording was not started"); return
+      }
+      m.captureVistaShot { result in
+        switch result {
+        case .success(let (n, normal)): promise.resolve(["shotCount": n, "trackingNormal": normal])
+        case .failure(let e): promise.reject("CAPTURE_FAILED", e.localizedDescription)
+        }
+      }
+    }
+
+    AsyncFunction("endVista") { (openingIds: [String], promise: Promise) in
+      guard let m = self.captureManager else { promise.resolve(0); return }
+      DispatchQueue.main.async {
+        do {
+          promise.resolve(try m.endVista(openingIds: openingIds))
+        } catch {
+          promise.reject("VISTA_FAILED", error.localizedDescription)
         }
       }
     }
