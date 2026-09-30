@@ -108,7 +108,7 @@ class FrameExporter {
         if openingsHint != nil || !openingFaces.isEmpty {
             // The screen's live list (corners, exterior vote, vista) plus the
             // raw ARKit window/door faces it was built from.
-            var hint = openingsHint ?? ["version": 1, "space": "arkit_world", "openings": []]
+            var hint: [String: Any] = openingsHint ?? ["version": 1, "space": "arkit_world", "openings": [Any]()]
             hint["face_columns"] = ["cx", "cy", "cz", "nx", "ny", "nz", "area_m2", "class"]
             hint["face_classes"] = faceClasses
             hint["faces"] = openingFaces
