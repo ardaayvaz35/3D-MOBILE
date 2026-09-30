@@ -27,6 +27,7 @@ final class WindowShotSession {
         let iso: Float
         let highRes: Bool
         let timestamp: TimeInterval
+        let trackingNormal: Bool
     }
 
     static let evSteps: [Float] = [-1.5, 0, 1.5]
@@ -34,6 +35,13 @@ final class WindowShotSession {
 
     private let host = ArkitSessionHost.shared
     private let dir: URL
+    private let vistaId: String
+    private let role: String
+    /// True for the old stand-alone window pass: it owns the session's photo mode.
+    private let ownsWindowMode: Bool
+    /// Every shot of the last group was taken with normal tracking. A group
+    /// that was not is kept (flagged in shots.json) but its target is asked again.
+    private(set) var lastGroupTrackingNormal = false
     private let ciContext = CIContext()
     private var shots: [Shot] = []
     private var groups = 0
@@ -41,8 +49,24 @@ final class WindowShotSession {
     init() {
         dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("window_pass_\(UUID().uuidString.prefix(8))")
+        vistaId = "window"
+        role = "vista"
+        ownsWindowMode = true
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         host.setWindowMode(true)
+    }
+
+    /// Vista pass inside a running LiDAR recording: shots go into the scan's
+    /// own folder (vistas/<id>/) and the session is left exactly as it is --
+    /// same configuration, same world, so the shots share the room's
+    /// coordinates. Regular frames, not high-res stills: switching to the
+    /// high-res video format would re-run the session.
+    init(into dir: URL, vistaId: String, role: String) {
+        self.dir = dir
+        self.vistaId = vistaId
+        self.role = role
+        ownsWindowMode = false
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     }
 
     var groupCount: Int { groups }
@@ -52,6 +76,7 @@ final class WindowShotSession {
     func captureGroup(completion: @escaping (Result<Int, Error>) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
             let group = self.groups
+            let before = self.shots.count
             var taken = 0
             var lastError: Error?
             let base = self.host.currentExposure()
@@ -69,6 +94,7 @@ final class WindowShotSession {
                 completion(.failure(lastError ?? NSError(domain: "WindowShot", code: 1)))
                 return
             }
+            self.lastGroupTrackingNormal = self.shots[before...].allSatisfy { $0.trackingNormal }
             self.groups += 1
             completion(.success(self.groups))
         }
@@ -120,14 +146,34 @@ final class WindowShotSession {
             width: Int(image.extent.width), height: Int(image.extent.height),
             exposureDuration: frame.camera.exposureDuration,
             iso: host.currentISO(),
-            highRes: highRes, timestamp: frame.timestamp))
+            highRes: highRes, timestamp: frame.timestamp,
+            trackingNormal: {
+                if case .normal = frame.camera.trackingState { return true }
+                return false
+            }()))
         return .success(())
     }
 
-    /// Writes shots.json, zips the folder, and hands back the zip's path.
-    func finish() throws -> (path: String, shots: Int, groups: Int) {
-        host.setWindowMode(false)
-        let metas: [[String: Any]] = shots.map { s in
+    /// Vista pass end: shots.json next to the JPEGs, no zip -- the scan's
+    /// own export zips the whole folder. Returns the group count.
+    func finishInPlace(openingIds: [String]) throws -> Int {
+        let meta: [String: Any] = [
+            "client_type": "ios_vista_pass",
+            "version": 1,
+            "vista_id": vistaId,
+            "role": role,
+            "opening_ids": openingIds,
+            "ev_steps": Self.evSteps,
+            "groups": groups,
+            "shots": shotMetas(),
+        ]
+        let json = try JSONSerialization.data(withJSONObject: meta, options: .prettyPrinted)
+        try json.write(to: dir.appendingPathComponent("shots.json"))
+        return groups
+    }
+
+    private func shotMetas() -> [[String: Any]] {
+        shots.map { (s) -> [String: Any] in
             let m = s.transform
             let k = s.intrinsics
             return [
@@ -145,8 +191,15 @@ final class WindowShotSession {
                 "iso": s.iso,
                 "high_res": s.highRes,
                 "timestamp_ns": Int(s.timestamp * 1_000_000_000),
+                "tracking_normal": s.trackingNormal,
             ]
         }
+    }
+
+    /// Writes shots.json, zips the folder, and hands back the zip's path.
+    func finish() throws -> (path: String, shots: Int, groups: Int) {
+        if ownsWindowMode { host.setWindowMode(false) }
+        let metas = shotMetas()
         let meta: [String: Any] = [
             "client_type": "ios_window_pass",
             "version": 1,
@@ -176,7 +229,7 @@ final class WindowShotSession {
     }
 
     func cancel() {
-        host.setWindowMode(false)
+        if ownsWindowMode { host.setWindowMode(false) }
         try? FileManager.default.removeItem(at: dir)
     }
 }
