@@ -51,7 +51,12 @@ final class ArkitSessionHost: NSObject, ARSessionDelegate {
             }
             return config
         }
-        config.sceneReconstruction = .mesh
+        // Classified mesh: window/door faces drive the live openings list and
+        // are exported as opening hints (openings_hint.json). Same
+        // reconstruction, one extra byte per face.
+        config.sceneReconstruction =
+            ARWorldTrackingConfiguration.supportsSceneReconstruction(.meshWithClassification)
+            ? .meshWithClassification : .mesh
         // One depth stream, not two. Both used to be requested, but only the
         // smoothed map is saved; producing the raw one as well was pure load
         // on a phone that already runs mesh reconstruction and the camera.
@@ -174,6 +179,160 @@ final class ArkitSessionHost: NSObject, ARSessionDelegate {
         if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
             device.whiteBalanceMode = .continuousAutoWhiteBalance
         }
+    }
+
+    // MARK: Exposure segments
+
+    /// What a lock froze: shutter, ISO and white-balance gains. Read after a
+    /// lock settles, re-applied verbatim when the visitor comes back inside,
+    /// so every indoor segment of one scan shares one exposure.
+    struct LockedExposure {
+        let duration: CMTime
+        let iso: Float
+        let gains: AVCaptureDevice.WhiteBalanceGains
+    }
+
+    func readLockedExposure() -> LockedExposure? {
+        var out: LockedExposure?
+        withDevice { d in
+            out = LockedExposure(duration: d.exposureDuration, iso: d.iso, gains: d.deviceWhiteBalanceGains)
+        }
+        return out
+    }
+
+    func applyLockedExposure(_ e: LockedExposure) {
+        withDevice { d in
+            if d.isExposureModeSupported(.custom) {
+                let f = d.activeFormat
+                let iso = min(max(e.iso, f.minISO), f.maxISO)
+                let s = min(max(e.duration.seconds, f.minExposureDuration.seconds), f.maxExposureDuration.seconds)
+                d.setExposureModeCustom(duration: CMTime(seconds: s, preferredTimescale: 1_000_000_000),
+                                        iso: iso, completionHandler: nil)
+            }
+            if d.isWhiteBalanceModeSupported(.locked) {
+                let m = d.maxWhiteBalanceGain
+                let g = AVCaptureDevice.WhiteBalanceGains(
+                    redGain: min(max(e.gains.redGain, 1), m),
+                    greenGain: min(max(e.gains.greenGain, 1), m),
+                    blueGain: min(max(e.gains.blueGain, 1), m))
+                d.setWhiteBalanceModeLocked(with: g, completionHandler: nil)
+            }
+        }
+    }
+
+    /// Continuous auto exposure and white balance metered on the centre, so a
+    /// new segment (balcony) can settle before it is locked.
+    func beginMetering() {
+        withDevice { d in
+            if d.isExposurePointOfInterestSupported { d.exposurePointOfInterest = CGPoint(x: 0.5, y: 0.5) }
+            if d.isExposureModeSupported(.continuousAutoExposure) { d.exposureMode = .continuousAutoExposure }
+            if d.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
+                d.whiteBalanceMode = .continuousAutoWhiteBalance
+            }
+            d.setExposureTargetBias(0, completionHandler: nil)
+        }
+    }
+
+    // MARK: Live openings (spec §4)
+
+    /// Class codes shared with src/capture/openings.ts (not ARKit's raw values).
+    static let clsWindow: Float = 1, clsDoor: Float = 2, clsFloor: Float = 3
+
+    /// Window, door and floor face centres of the classified mesh, world
+    /// space, flat [x, y, z, cls, ...]. Floor is thinned (every 8th face):
+    /// it only gives the floor height. At most `maxPoints` points.
+    func classifiedPoints(maxPoints: Int = 4000) -> [Float] {
+        var out: [Float] = []
+        var floorSeen = 0
+        let window = UInt8(ARMeshClassification.window.rawValue)
+        let door = UInt8(ARMeshClassification.door.rawValue)
+        let floor = UInt8(ARMeshClassification.floor.rawValue)
+        for anchor in currentMeshAnchors() {
+            let g = anchor.geometry
+            guard let cls = g.classification else { continue }
+            let faces = g.faces
+            let vtx = g.vertices
+            let vbase = vtx.buffer.contents()
+            let fbase = faces.buffer.contents()
+            let cbase = cls.buffer.contents()
+            func vertex(_ i: Int) -> simd_float3 {
+                let p = vbase.advanced(by: vtx.offset + i * vtx.stride)
+                    .assumingMemoryBound(to: (Float, Float, Float).self).pointee
+                return simd_float3(p.0, p.1, p.2)
+            }
+            for f in 0..<faces.count {
+                if out.count >= maxPoints * 4 { return out }
+                let c = cbase.advanced(by: cls.offset + f * cls.stride)
+                    .assumingMemoryBound(to: UInt8.self).pointee
+                let code: Float
+                if c == window {
+                    code = Self.clsWindow
+                } else if c == door {
+                    code = Self.clsDoor
+                } else if c == floor {
+                    floorSeen += 1
+                    guard floorSeen % 8 == 0 else { continue }
+                    code = Self.clsFloor
+                } else {
+                    continue
+                }
+                let ip = fbase.advanced(by: f * faces.indexCountPerPrimitive * faces.bytesPerIndex)
+                    .assumingMemoryBound(to: UInt32.self)
+                let local = (vertex(Int(ip[0])) + vertex(Int(ip[1])) + vertex(Int(ip[2]))) / 3
+                let w = anchor.transform * simd_float4(local, 1)
+                out.append(contentsOf: [w.x, w.y, w.z, code])
+            }
+        }
+        return out
+    }
+
+    /// Luma (0..255) of the current camera image at each world point, -1 when
+    /// the point is behind the camera or outside the image. Flat [x, y, z, ...].
+    func sampleLuma(_ flat: [Double]) -> [Int] {
+        let none = Array(repeating: -1, count: flat.count / 3)
+        guard let frame = session.currentFrame else { return none }
+        let buf = frame.capturedImage
+        CVPixelBufferLockBaseAddress(buf, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buf, .readOnly) }
+        guard CVPixelBufferGetPlaneCount(buf) >= 1,
+              let base = CVPixelBufferGetBaseAddressOfPlane(buf, 0)
+        else { return none }
+        let w = CVPixelBufferGetWidthOfPlane(buf, 0)
+        let h = CVPixelBufferGetHeightOfPlane(buf, 0)
+        let row = CVPixelBufferGetBytesPerRowOfPlane(buf, 0)
+        let luma = base.assumingMemoryBound(to: UInt8.self)
+        let cam = frame.camera
+        let toCam = cam.transform.inverse
+        let size = cam.imageResolution
+        var out: [Int] = []
+        out.reserveCapacity(flat.count / 3)
+        var i = 0
+        while i + 2 < flat.count {
+            let p = simd_float3(Float(flat[i]), Float(flat[i + 1]), Float(flat[i + 2]))
+            i += 3
+            // The camera looks down its own -Z: z >= 0 is behind it.
+            if (toCam * simd_float4(p, 1)).z >= 0 { out.append(-1); continue }
+            let s = cam.projectPoint(p, orientation: .landscapeRight, viewportSize: size)
+            let px = Int(s.x * CGFloat(w) / size.width)
+            let py = Int(s.y * CGFloat(h) / size.height)
+            guard px >= 0, py >= 0, px < w, py < h else { out.append(-1); continue }
+            out.append(Int(luma[py * row + px]))
+        }
+        return out
+    }
+
+    /// World point under a tap on the portrait preview (x, y in 0..1 of a view
+    /// of `viewW` x `viewH` points), or nil. Estimated planes of any
+    /// orientation: the tap is on a window frame.
+    func raycast(x: Double, y: Double, viewW: Double, viewH: Double) -> [Float]? {
+        guard let frame = session.currentFrame, viewW > 0, viewH > 0 else { return nil }
+        let toImage = frame.displayTransform(for: .portrait,
+                                             viewportSize: CGSize(width: viewW, height: viewH)).inverted()
+        let p = CGPoint(x: x, y: y).applying(toImage)
+        let q = frame.raycastQuery(from: p, allowing: .estimatedPlane, alignment: .any)
+        guard let hit = session.raycast(q).first else { return nil }
+        let t = hit.worldTransform.columns.3
+        return [t.x, t.y, t.z]
     }
 
     // MARK: Window pass exposure
