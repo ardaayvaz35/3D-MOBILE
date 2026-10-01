@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  CLS_DOOR, CLS_FLOOR, CLS_WINDOW, clusterPoints, crossing, floorHeight, isExterior, isTraversable,
+  CLS_DOOR, CLS_FLOOR, CLS_WINDOW, clusterPoints, crossing, doorwayStep, type DoorwayState, floorHeight, isExterior, isTraversable,
   lumaSamples, manualOpening, mergeOpenings, missingVistas, openingNames, openingsFacing, openingsHint,
   rectFromPoints, visibleTargets, voteExterior, type Opening,
 } from './openings.ts';
@@ -140,4 +140,29 @@ test('hint JSON carries the decisions', () => {
   assert.equal(h.openings[0].source, 'arkit');
   assert.equal(h.floor_y, 0);
   assert.ok(CLS_FLOOR > 0);
+});
+
+test('doorway: leaning out through the door does not switch, walking out and back in does', () => {
+  const [door] = mergeOpenings([], wall(CLS_DOOR, -0.45, 0.45, 0, 2.1), ROOM);
+  const ops = [door];
+  const walk = (zs: number[]) => {
+    let st: DoorwayState = { pending: null };
+    const out: (string | null)[] = [];
+    for (let i = 1; i < zs.length; i++) {
+      const r = doorwayStep(st, [0, 1.4, zs[i - 1]], [0, 1.4, zs[i]], ops, 0);
+      st = r.state;
+      out.push(r.switchTo);
+    }
+    return out.filter(Boolean);
+  };
+  // door plane at z = -3, outside is z < -3
+  assert.deepEqual(walk([-2.6, -2.9, -3.2, -3.4, -3.1, -2.8, -2.5]), []); // phone held 40 cm out, pulled back
+  assert.deepEqual(walk([-2.6, -2.9, -3.2, -3.5, -3.8]), ['out']);
+  assert.deepEqual(walk([-3.8, -3.2, -2.9, -2.6, -2.2]), ['in']);
+  assert.deepEqual(walk([-2.0, -2.5, -2.9, -2.95]), []); // close to the glass, never through
+  // a window (sill at 1 m) is never walked through
+  const win = mergeOpenings([], wall(CLS_WINDOW, -0.5, 0.5, 1, 2.2), ROOM);
+  let st: DoorwayState = { pending: null };
+  for (const z of [-2.8, -3.2, -3.8]) st = doorwayStep(st, [0, 1.4, z + 0.4], [0, 1.4, z], win, 0).state;
+  assert.equal(st.pending, null);
 });

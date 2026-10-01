@@ -256,6 +256,44 @@ export function crossing(prev: Vec3, cur: Vec3, o: Opening, margin = 0.25): 'out
   return s1 >= 0 ? 'out' : 'in';
 }
 
+/** Past the doorway by this much before the segment switches (leaning out is not going out). */
+export const COMMIT_M = 0.6;
+
+export type DoorwayState = { pending: { id: string; dir: 'out' | 'in' } | null };
+
+/**
+ * Walking through a door, step by step. Passing through a traversable
+ * opening's rectangle only arms a switch; it fires once the phone is
+ * COMMIT_M beyond the door plane, and is dropped if the phone comes back to
+ * the side it started on (phone held out through the door, then pulled back).
+ * Decided by position alone, never by brightness: a bright spot inside the
+ * room keeps the room's exposure.
+ */
+export function doorwayStep(
+  state: DoorwayState, prev: Vec3, cur: Vec3, openings: Opening[], floorY: number | null,
+): { state: DoorwayState; switchTo: 'out' | 'in' | null } {
+  const p = state.pending;
+  if (p) {
+    const o = openings.find((x) => x.id === p.id);
+    if (!o) return { state: { pending: null }, switchTo: null };
+    const s = dot(sub(cur, o.centre), o.normal);
+    if (p.dir === 'out') {
+      if (s >= COMMIT_M) return { state: { pending: null }, switchTo: 'out' };
+      if (s < 0) return { state: { pending: null }, switchTo: null };
+    } else {
+      if (s <= -COMMIT_M) return { state: { pending: null }, switchTo: 'in' };
+      if (s > 0) return { state: { pending: null }, switchTo: null };
+    }
+    return { state, switchTo: null };
+  }
+  for (const o of openings) {
+    if (!isTraversable(o, floorY)) continue;
+    const c = crossing(prev, cur, o);
+    if (c) return doorwayStep({ pending: { id: o.id, dir: c } }, prev, cur, openings, floorY);
+  }
+  return { state, switchTo: null };
+}
+
 /** Exterior openings facing the way the phone looks (within 70 deg, level). */
 export function openingsFacing(openings: Opening[], forward: Vec3): Opening[] {
   const h = Math.hypot(forward[0], forward[2]);

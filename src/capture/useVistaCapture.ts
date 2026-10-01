@@ -23,9 +23,9 @@ import type { GuidancePayload, PosePayload } from '../../modules/arkit-capture/s
 import { ALIGN_DEG, angleDeg, holdStep, makeTargets, nextTarget, toScreen, type Vec3 } from './vistaTargets';
 import {
   centroid,
-  crossing,
+  doorwayStep,
+  type DoorwayState,
   floorHeight,
-  isTraversable,
   lumaSamples,
   manualOpening,
   mergeOpenings,
@@ -65,6 +65,7 @@ export function useVistaCapture(recording: boolean, size: { width: number; heigh
   const outdoorRef = useRef(false);
   const busyRef = useRef(false);
   const lastSegmentT = useRef(0);
+  const doorway = useRef<DoorwayState>({ pending: null });
   const vistaRoleRef = useRef<Role | null>(null);
   const vistaId = useRef('');
   const vistaOpeningIds = useRef<string[]>([]);
@@ -87,6 +88,7 @@ export function useVistaCapture(recording: boolean, size: { width: number; heigh
     floorY.current = null;
     indoorPath.current = [];
     lastPos.current = null;
+    doorway.current = { pending: null };
     outdoorRef.current = false;
     setOutdoor(false);
     vistaRoleRef.current = null;
@@ -129,12 +131,10 @@ export function useVistaCapture(recording: boolean, size: { width: number; heigh
         }
         if (!prev || vistaRoleRef.current || busyRef.current || p.paused) return;
         if (Date.now() / 1000 - lastSegmentT.current < SEGMENT_COOLDOWN_S) return;
-        for (const o of openingsRef.current) {
-          if (!isTraversable(o, floorY.current)) continue;
-          const c = crossing(prev, cur, o);
-          if (c === 'out' && !outdoorRef.current) { void switchSegment(true); break; }
-          if (c === 'in' && outdoorRef.current) { void switchSegment(false); break; }
-        }
+        const step = doorwayStep(doorway.current, prev, cur, openingsRef.current, floorY.current);
+        doorway.current = step.state;
+        if (step.switchTo === 'out' && !outdoorRef.current) void switchSegment(true);
+        if (step.switchTo === 'in' && outdoorRef.current) void switchSegment(false);
       }),
     [recording]
   );
