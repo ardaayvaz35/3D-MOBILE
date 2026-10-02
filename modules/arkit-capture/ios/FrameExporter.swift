@@ -54,7 +54,7 @@ class FrameExporter {
                 ? "" : URL(fileURLWithPath: frame.confidencePath).lastPathComponent
 
             let intrinsics = frame.intrinsics
-            frameMetas.append([
+            var meta: [String: Any] = [
                 "frame_id": frame.index,
                 "timestamp_ns": Int(frame.timestamp * 1_000_000_000),
                 "image_path": rgbFile.lastPathComponent,
@@ -73,14 +73,27 @@ class FrameExporter {
                 // correction and silently wrong if guessed.
                 "depth_width": frame.depthWidth,
                 "depth_height": frame.depthHeight,
-                // Constant across frames when the exposure lock held.
+                // Auto exposure: these vary per frame (see camera fields below).
                 "exposure_duration": frame.exposureDuration,
                 "exposure_offset": frame.exposureOffset,
+                "exposure_mode": "auto",
                 // 0 nominal .. 3 critical, and ms spent saving the frame.
                 "thermal_state": frame.thermalState,
                 "process_ms": (frame.processMs * 10).rounded() / 10,
                 "segment": frame.segment,
-            ])
+            ]
+            // ISO, white-balance gains (R, G, B) and their temperature/tint:
+            // what the server needs to bring every frame to one scale.
+            if let c = frame.camera {
+                meta["iso"] = c.iso
+                meta["wb_gains"] = [c.gains.redGain, c.gains.greenGain, c.gains.blueGain]
+                meta["wb_temperature_k"] = c.temperature
+                meta["wb_tint"] = c.tint
+                meta["device_exposure_duration"] = c.duration
+            }
+            if let v = frame.lightIntensity { meta["light_intensity"] = v }
+            if let v = frame.lightTemperature { meta["light_temperature_k"] = v }
+            frameMetas.append(meta)
         }
 
         var summary: [String: Any] = [

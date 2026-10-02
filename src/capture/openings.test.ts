@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   CLS_DOOR, CLS_FLOOR, CLS_WINDOW, clusterPoints, crossing, doorwayStep, type DoorwayState, floorHeight, isExterior, isTraversable,
-  lumaSamples, manualOpening, mergeOpenings, missingVistas, openingNames, openingsFacing, openingsHint,
+  imageFraction, lumaSamples, manualOpening, MAX_VOTE_FRACTION, mergeOpenings, missingVistas, openingNames, openingsFacing, openingsHint,
   rectFromPoints, visibleTargets, voteExterior, type Opening,
 } from './openings.ts';
 
@@ -74,6 +74,18 @@ test('luma votes: clipped glass is exterior, visible glass is not', () => {
   // mostly out of view: no vote
   const skipped = voteExterior(inner, [255, 255, ...new Array(14).fill(-1)]);
   assert.equal(skipped.seen, inner.seen);
+});
+
+test('glass votes only while small in the frame (auto exposure follows the room)', () => {
+  const o = windowAt(-0.5, 0.5); // 1 x 1.2 m, centre about 3 m away
+  const f = 1344; // iPhone wide camera at 1920 x 1440
+  // From the room centre: ~448 x 538 px of 1920 x 1440 = 8.7 %, votes.
+  near(imageFraction(o, ROOM, f, 1920, 1440), (448 * 537.6) / (1920 * 1440), 0.01);
+  assert.ok(imageFraction(o, ROOM, f, 1920, 1440) <= MAX_VOTE_FRACTION);
+  // Standing 1 m from it the glass fills the frame: auto exposes for it, no vote.
+  assert.ok(imageFraction(o, [0, 1.6, -2], f, 1920, 1440) > MAX_VOTE_FRACTION);
+  // Never more than the whole frame.
+  assert.equal(imageFraction(o, [0, 1.6, -2.95], f, 1920, 1440), 1);
 });
 
 test('traversable: doors, and tall openings that reach the floor', () => {

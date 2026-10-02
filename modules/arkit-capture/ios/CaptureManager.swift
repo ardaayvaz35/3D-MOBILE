@@ -37,11 +37,18 @@ class CaptureManager {
         // yeniden sekillendiremez; sabit varsaymak da cihaz degisince bozar.
         let depthWidth: Int
         let depthHeight: Int
-        // Exposure the frame was actually taken at. With the recording's lock
-        // holding these stay constant, which lets the server verify the lock
-        // worked instead of trusting that it was requested.
+        // Exposure the frame was actually taken at. Recordings run on auto
+        // exposure, so these change between frames and the server uses them
+        // to bring every frame to one brightness and colour scale.
         let exposureDuration: Double
         let exposureOffset: Float
+        /// ISO, white-balance gains and their colour temperature; nil when the
+        /// device could not be read (before iOS 16).
+        let camera: ArkitSessionHost.CameraSettings?
+        /// ARKit's own light estimate for the frame (lumens ~1000 = neutral,
+        /// Kelvin), independent of the camera's white balance.
+        let lightIntensity: Double?
+        let lightTemperature: Double?
         // ProcessInfo.ThermalState raw value (0 nominal .. 3 critical) when the
         // frame was taken, and how long saving it took. Recorded so the next
         // "the phone got hot" report is a measurement, not a guess.
@@ -183,14 +190,14 @@ class CaptureManager {
     private var recordingStart: Date?
     private var visitedSectors = Set<Int>()
 
-    // Exposure segments (spec §4): 0 is the room, locked at start. Going out
-    // meters and locks a new exposure; coming back re-applies the room's.
+    // Segments (spec §4): 0 is the room. Exposure is continuous auto for the
+    // whole recording, so a segment is only a label (indoor / outdoor) plus
+    // the camera settings at the moment it began; every frame carries its
+    // own settings anyway.
     private var segments: [[String: Any]] = []
     private var currentSegment = 0
-    private var roomExposure: ArkitSessionHost.LockedExposure?
-    private var segmentExposure: ArkitSessionHost.LockedExposure?
-    /// Frames are not kept while a vista pass or a re-metering runs: their
-    /// exposure is not the segment's.
+    /// Frames are not kept while a vista pass runs (its brackets set a custom
+    /// exposure) or while auto exposure settles back afterwards.
     private var framesPaused = false
     private var vista: WindowShotSession?
     private var vistaInfo: [String: Any] = [:]
@@ -243,9 +250,9 @@ class CaptureManager {
         // would be shipped inside this one. Start from an empty directory.
         try? FileManager.default.removeItem(at: tempDir)
         try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        // Before the first frame is taken, so every kept frame shares one
-        // exposure and one white balance. See lockExposureAndWhiteBalance().
-        ArkitSessionHost.shared.lockExposureAndWhiteBalance()
+        // Continuous auto exposure and white balance, metered on the centre:
+        // each room is exposed for its own light. See CameraSettings.
+        ArkitSessionHost.shared.beginMetering()
         segments.removeAll()
         vistas.removeAll()
         vista = nil
@@ -254,10 +261,6 @@ class CaptureManager {
         framesPaused = false
         currentSegment = 0
         openingsHint = nil
-        // Read once the first frames flow (recordRoomExposureIfNeeded): the
-        // lock needs a moment to report its final values.
-        roomExposure = nil
-        segmentExposure = nil
         ArkitSessionHost.shared.coverage.reset()
         ArkitSessionHost.shared.coverageActive = true
         guidance?.shutdown()
@@ -365,21 +368,16 @@ class CaptureManager {
 
     // MARK: - Exposure segments (spec §4)
 
-    private func recordRoomExposureIfNeeded() {
-        guard roomExposure == nil, let e = ArkitSessionHost.shared.readLockedExposure() else { return }
-        roomExposure = e
-        segmentExposure = e
-        segments = [Self.segmentEntry(id: 0, outdoor: false, e)]
+    private func recordRoomSegmentIfNeeded() {
+        guard segments.isEmpty else { return }
+        segments = [Self.segmentEntry(id: 0, outdoor: false, ArkitSessionHost.shared.readCameraSettings())]
     }
 
-    private static func segmentEntry(id: Int, outdoor: Bool, _ e: ArkitSessionHost.LockedExposure) -> [String: Any] {
-        [
-            "id": id,
-            "kind": outdoor ? "outdoor" : "indoor",
-            "exposure_duration": e.duration.seconds,
-            "iso": e.iso,
-            "wb_gains": [e.gains.redGain, e.gains.greenGain, e.gains.blueGain],
-        ]
+    private static func segmentEntry(id: Int, outdoor: Bool,
+                                     _ e: ArkitSessionHost.CameraSettings?) -> [String: Any] {
+        var entry: [String: Any] = ["id": id, "kind": outdoor ? "outdoor" : "indoor", "exposure": "auto"]
+        if let e = e { entry.merge(e.asJSON) { _, new in new } }
+        return entry
     }
 
     /// Camera pose ~10 times a second for the whole recording: the screen
@@ -402,34 +400,15 @@ class CaptureManager {
         ])
     }
 
-    /// Outdoor: meter for a second, then lock and start a new segment.
-    /// Indoor: re-apply the room's exposure exactly and start a new segment.
+    /// Starts a new segment: only a label (indoor / outdoor) and the settings
+    /// at this moment. Auto exposure follows the light by itself, so frames
+    /// keep flowing; nothing is paused or locked.
     func beginSegment(outdoor: Bool, completion: @escaping (Int) -> Void) {
-        framesPaused = true
-        let finish: (ArkitSessionHost.LockedExposure?) -> Void = { e in
-            let id = self.segments.count
-            if let e = e {
-                self.segmentExposure = e
-                self.segments.append(Self.segmentEntry(id: id, outdoor: outdoor, e))
-            }
-            self.currentSegment = id
-            self.framesPaused = false
-            completion(id)
-        }
-        if outdoor {
-            ArkitSessionHost.shared.beginMetering()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-                ArkitSessionHost.shared.lockExposureAndWhiteBalance()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                    finish(ArkitSessionHost.shared.readLockedExposure())
-                }
-            }
-        } else if let room = roomExposure {
-            ArkitSessionHost.shared.applyLockedExposure(room)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { finish(room) }
-        } else {
-            finish(nil)
-        }
+        recordRoomSegmentIfNeeded()
+        let id = segments.count
+        segments.append(Self.segmentEntry(id: id, outdoor: outdoor, ArkitSessionHost.shared.readCameraSettings()))
+        currentSegment = id
+        completion(id)
     }
 
     /// The screen's live openings list, written as openings_hint.json.
@@ -470,7 +449,9 @@ class CaptureManager {
         }
     }
 
-    /// Writes shots.json, restores the segment's locked exposure, resumes frames.
+    /// Writes shots.json, returns to centre-metered auto exposure (the vista
+    /// pass meters on a tapped outdoor point and brackets with a custom
+    /// exposure), and resumes frames once auto has had a moment to settle.
     func endVista(openingIds: [String]) throws -> Int {
         guard let v = vista else { return 0 }
         vista = nil
@@ -479,14 +460,18 @@ class CaptureManager {
         info["groups"] = groups
         info["opening_ids"] = openingIds
         if groups > 0 { vistas.append(info) }
-        if let e = segmentExposure { ArkitSessionHost.shared.applyLockedExposure(e) }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.framesPaused = false }
+        ArkitSessionHost.shared.beginMetering()
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.autoSettleSeconds) { self.framesPaused = false }
         return groups
     }
 
+    /// Time auto exposure and white balance get to settle after a custom
+    /// exposure before frames count again.
+    private static let autoSettleSeconds = 0.8
+
     private func handle(frame: ARFrame) {
         guard isRecording else { return }
-        recordRoomExposureIfNeeded()
+        recordRoomSegmentIfNeeded()
         emitPose(frame)
         if framesPaused { return }
 
@@ -615,6 +600,11 @@ class CaptureManager {
         let timestamp = frame.timestamp
         let exposureDuration = frame.camera.exposureDuration
         let exposureOffset = frame.camera.exposureOffset
+        // Read now, while the frame is current: auto exposure keeps moving.
+        let camera = ArkitSessionHost.shared.readCameraSettings()
+        let light = frame.lightEstimate
+        let lightIntensity = light.map { Double($0.ambientIntensity) }
+        let lightTemperature = light.map { Double($0.ambientColorTemperature) }
 
         let segmentNow = currentSegment
         workQueue.async { [weak self] in
@@ -624,7 +614,9 @@ class CaptureManager {
                             confidenceMap: confidenceMap, fullIntrinsics: intrinsics,
                             imageResolution: imageResolution, pose: pose,
                             timestamp: timestamp, exposureDuration: exposureDuration,
-                            exposureOffset: exposureOffset, thermalState: thermal,
+                            exposureOffset: exposureOffset, camera: camera,
+                            lightIntensity: lightIntensity, lightTemperature: lightTemperature,
+                            thermalState: thermal,
                             coverage: coverageNow, inBand: inBand, segment: segmentNow)
         }
     }
@@ -669,7 +661,9 @@ class CaptureManager {
                             confidenceMap: CVPixelBuffer?, fullIntrinsics: simd_float3x3,
                             imageResolution: CGSize, pose: simd_float4x4,
                             timestamp: TimeInterval, exposureDuration: Double,
-                            exposureOffset: Float, thermalState: Int, coverage: Double,
+                            exposureOffset: Float, camera: ArkitSessionHost.CameraSettings?,
+                            lightIntensity: Double?, lightTemperature: Double?,
+                            thermalState: Int, coverage: Double,
                             inBand: Bool, segment: Int) {
         let started = CACurrentMediaTime()
         let rgbImage = CIImage(cvPixelBuffer: pixelBuffer)
@@ -789,6 +783,9 @@ class CaptureManager {
             depthHeight: depthHeight,
             exposureDuration: exposureDuration,
             exposureOffset: exposureOffset,
+            camera: camera,
+            lightIntensity: lightIntensity,
+            lightTemperature: lightTemperature,
             thermalState: thermalState,
             processMs: processMs,
             bytes: bytesWritten,

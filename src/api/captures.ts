@@ -181,6 +181,27 @@ async function putArchive(archive: LocalArchive): Promise<UploadTarget> {
   return target;
 }
 
+/// `submit-capture` writes "GPU tetiklenemedi: RunPod 409 ..." when the scan
+/// is stored but the GPU did not start (parked endpoint). For the user that
+/// scan is simply waiting its turn.
+export function friendlyDetail(status: string | null | undefined, detail: string | null | undefined): string {
+  if (status === 'uploaded' && (detail ?? '').startsWith('GPU tetiklenemedi')) {
+    return 'Tarama güvende. İşlenmeyi bekliyor; tekrar yüklemene gerek yok.';
+  }
+  return detail ?? '';
+}
+
+/// JSON body of a failed Edge Function call, or null when there is none.
+async function readErrorBody(ctx: unknown): Promise<Record<string, unknown> | null> {
+  if (!ctx || typeof (ctx as Response).json !== 'function') return null;
+  try {
+    const body = await (ctx as Response).clone().json();
+    return body && typeof body === 'object' ? (body as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function uploadCapture(
   archive: LocalArchive,
   clientType: ClientType
@@ -193,9 +214,18 @@ export async function uploadCapture(
     body: { client_type: clientType, storage_path: storagePath },
   });
   if (error) {
-    // Surface the function's structured error (e.g. insufficient_credits).
-    const ctx = (error as any).context;
-    const detail = ctx?.error ?? error.message;
+    // supabase-js puts the raw Response in `context`; its JSON body carries
+    // the function's structured error (e.g. insufficient_credits).
+    const body = await readErrorBody((error as any).context);
+    // The capture row exists and the archive is stored; only starting the GPU
+    // failed (e.g. the endpoint is parked, RunPod 409). The scan is safe and
+    // is processed later -- not an error for the user, and pressing "retry"
+    // would only upload it a second time.
+    if (body?.error === 'gpu_trigger_failed' && typeof body.capture_id === 'string') {
+      console.log('[upload] stored, GPU not started yet; capture_id:', body.capture_id);
+      return { capture_id: body.capture_id, status: 'uploaded', message: 'Yüklendi, işlenmeyi bekliyor' };
+    }
+    const detail = body?.error ?? error.message;
     console.log('[upload] submit-capture FAILED', detail, error);
     throw new Error(`İşleme başlatılamadı: ${detail}`);
   }
@@ -265,7 +295,7 @@ export async function getCaptureStatus(captureId: string): Promise<CaptureDetail
     capture_id: captureId,
     status: (data.status ?? 'unknown') as CaptureStatusValue,
     progress: data.progress ?? 0,
-    stage_detail: data.detail ?? '',
+    stage_detail: friendlyDetail(data.status, data.detail),
     output_splat_url: splatUrl,
     output_ply_url: plyUrl,
     created_at: data.created_at ?? '',

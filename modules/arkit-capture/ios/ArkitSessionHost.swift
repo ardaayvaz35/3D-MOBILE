@@ -130,19 +130,9 @@ final class ArkitSessionHost: NSObject, ARSessionDelegate {
         onFrame = nil
     }
 
-    /// Holds exposure and white balance fixed for the length of a recording.
-    ///
-    /// Left on auto, the camera re-exposed as the phone swept past the window:
-    /// on a real 241-frame scan one physical wall point varied 11.9% in
-    /// brightness (median; 27% peak-to-peak) across the frames that saw it.
-    /// Gaussian splatting assumes a point has one colour, so it resolved the
-    /// contradiction by smearing gaussians until each view's average matched
-    /// -- the streaky "wet paint" walls. Locked, every frame shares one
-    /// exposure and the server's bilateral grid only absorbs what remains.
-    ///
-    /// Taken at the moment recording starts, so starting while pointed at a
-    /// normally lit part of the room matters. Returns false where the OS or
-    /// camera cannot lock (before iOS 16); recording proceeds unlocked.
+    /// Holds exposure and white balance at their current values. No longer
+    /// used for recordings (see `CameraSettings`); kept for passes that need a
+    /// fixed exposure. Returns false where the OS or camera cannot lock.
     @discardableResult
     func lockExposureAndWhiteBalance() -> Bool {
         guard #available(iOS 16.0, *) else { return false }
@@ -181,47 +171,56 @@ final class ArkitSessionHost: NSObject, ARSessionDelegate {
         }
     }
 
-    // MARK: Exposure segments
+    // MARK: Camera settings per frame
 
-    /// What a lock froze: shutter, ISO and white-balance gains. Read after a
-    /// lock settles, re-applied verbatim when the visitor comes back inside,
-    /// so every indoor segment of one scan shares one exposure.
-    struct LockedExposure {
-        let duration: CMTime
+    /// What the camera used for one frame. Recordings run on continuous auto
+    /// exposure and white balance (a house mixes dark bedrooms and sunlit
+    /// living rooms; one lock cannot serve both), so every kept frame carries
+    /// its own values and the server brings all frames to one scale before
+    /// training. Before this, a recording locked at Start: the 2026-10-02
+    /// scan locked while a pink wallpaper filled the screen, auto white
+    /// balance had called the pink grey, and every frame came out cyan.
+    struct CameraSettings {
+        let duration: Double
         let iso: Float
         let gains: AVCaptureDevice.WhiteBalanceGains
-    }
+        /// Colour temperature (K) and tint the gains correspond to.
+        let temperature: Float
+        let tint: Float
 
-    func readLockedExposure() -> LockedExposure? {
-        var out: LockedExposure?
-        withDevice { d in
-            out = LockedExposure(duration: d.exposureDuration, iso: d.iso, gains: d.deviceWhiteBalanceGains)
-        }
-        return out
-    }
-
-    func applyLockedExposure(_ e: LockedExposure) {
-        withDevice { d in
-            if d.isExposureModeSupported(.custom) {
-                let f = d.activeFormat
-                let iso = min(max(e.iso, f.minISO), f.maxISO)
-                let s = min(max(e.duration.seconds, f.minExposureDuration.seconds), f.maxExposureDuration.seconds)
-                d.setExposureModeCustom(duration: CMTime(seconds: s, preferredTimescale: 1_000_000_000),
-                                        iso: iso, completionHandler: nil)
-            }
-            if d.isWhiteBalanceModeSupported(.locked) {
-                let m = d.maxWhiteBalanceGain
-                let g = AVCaptureDevice.WhiteBalanceGains(
-                    redGain: min(max(e.gains.redGain, 1), m),
-                    greenGain: min(max(e.gains.greenGain, 1), m),
-                    blueGain: min(max(e.gains.blueGain, 1), m))
-                d.setWhiteBalanceModeLocked(with: g, completionHandler: nil)
-            }
+        var asJSON: [String: Any] {
+            [
+                "exposure_duration": duration,
+                "iso": iso,
+                "wb_gains": [gains.redGain, gains.greenGain, gains.blueGain],
+                "wb_temperature_k": temperature,
+                "wb_tint": tint,
+            ]
         }
     }
 
-    /// Continuous auto exposure and white balance metered on the centre, so a
-    /// new segment (balcony) can settle before it is locked.
+    /// Reads without `lockForConfiguration`: these are plain property reads,
+    /// cheap enough for every kept frame.
+    func readCameraSettings() -> CameraSettings? {
+        guard #available(iOS 16.0, *),
+              let d = ARWorldTrackingConfiguration.configurableCaptureDeviceForPrimaryCamera
+        else { return nil }
+        let g = d.deviceWhiteBalanceGains
+        // temperatureAndTintValues throws an exception for gains outside
+        // 1...max; the device's own gains are always inside, but clamp anyway.
+        let m = d.maxWhiteBalanceGain
+        let safe = AVCaptureDevice.WhiteBalanceGains(
+            redGain: min(max(g.redGain, 1), m),
+            greenGain: min(max(g.greenGain, 1), m),
+            blueGain: min(max(g.blueGain, 1), m))
+        let tt = d.temperatureAndTintValues(for: safe)
+        return CameraSettings(duration: d.exposureDuration.seconds, iso: d.iso, gains: g,
+                              temperature: tt.temperature, tint: tt.tint)
+    }
+
+    /// Continuous auto exposure and white balance metered on the centre: the
+    /// recording mode, and the way back after a vista bracket or a tap that
+    /// moved the metering point.
     func beginMetering() {
         withDevice { d in
             if d.isExposurePointOfInterestSupported { d.exposurePointOfInterest = CGPoint(x: 0.5, y: 0.5) }

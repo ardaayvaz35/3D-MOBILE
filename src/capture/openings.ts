@@ -4,7 +4,7 @@
  * The native side hands over classified mesh points (window / door / floor)
  * about once a second; this file turns them into vertical rectangles
  * ("openings"), keeps their ids stable between updates, votes whether each
- * one looks out (its glass is clipped white under the room's locked
+ * one looks out (its glass clips white while the room sets the auto
  * exposure), notices when the phone walks through one, and says which
  * directions a vista must cover to fill it. Pure math, ARKit world
  * (+Y up, metres).
@@ -23,7 +23,7 @@ export type Opening = {
   normal: Vec3;
   width: number;
   height: number;
-  /** Luma votes taken while the room exposure was locked. */
+  /** Luma votes taken while the glass was small in the frame (room sets exposure). */
   seen: number;
   clipped: number;
   /** Vista id that covers it, null until one is shot. */
@@ -207,8 +207,27 @@ export function lumaSamples(o: Opening): Vec3[] {
 }
 
 /**
- * One look at the glass under the locked room exposure. `luma` has -1 for
- * samples out of view. Most in-view samples clipped = one "outside" vote.
+ * Share of the image the opening covers seen from `eye` (pinhole, facing it
+ * square on: an upper bound). Recording runs on auto exposure, so the vote
+ * below only means something while the glass is a small part of the frame
+ * and the room sets the exposure; filling the frame, the camera exposes for
+ * the glass and the view outside stops clipping.
+ */
+export function imageFraction(o: Opening, eye: Vec3, focal: number, imgW: number, imgH: number): number {
+  const d = dist(o.centre, eye);
+  if (d <= 0 || imgW <= 0 || imgH <= 0) return 1;
+  const w = (o.width * focal) / d;
+  const h = (o.height * focal) / d;
+  return Math.min(1, (Math.min(w, imgW) * Math.min(h, imgH)) / (imgW * imgH));
+}
+
+/** Larger than this in the image and the glass would steer auto exposure. */
+export const MAX_VOTE_FRACTION = 0.15;
+
+/**
+ * One look at the glass while the room sets the (auto) exposure; see
+ * imageFraction. `luma` has -1 for samples out of view. Most in-view samples
+ * clipped = one "outside" vote.
  */
 export function voteExterior(o: Opening, luma: number[]): Opening {
   const valid = luma.filter((v) => v >= 0);
@@ -259,7 +278,7 @@ export function crossing(prev: Vec3, cur: Vec3, o: Opening, margin = 0.25): 'out
 /**
  * Past the doorway by this much before the segment switches. Small on
  * purpose: a phone held out through the door does switch, but pulling it
- * back switches again and restores the room's exposure exactly.
+ * back switches again. Segments are labels only (exposure is auto).
  */
 export const COMMIT_M = 0.1;
 
@@ -271,7 +290,7 @@ export type DoorwayState = { pending: { id: string; dir: 'out' | 'in' } | null }
  * COMMIT_M beyond the door plane, and is dropped if the phone comes back to
  * the side it started on first (jitter right at the door plane).
  * Decided by position alone, never by brightness: a bright spot inside the
- * room keeps the room's exposure.
+ * room stays an indoor segment.
  */
 export function doorwayStep(
   state: DoorwayState, prev: Vec3, cur: Vec3, openings: Opening[], floorY: number | null,

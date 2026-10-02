@@ -1,7 +1,7 @@
 /**
  * Window / balcony part of a LiDAR recording (spec 2026-09-30-pencere-manzara-design.md §4):
- * live openings list with the inside/outside vote, automatic exposure
- * segment when the phone walks through a door (button as fallback), manual
+ * live openings list with the inside/outside vote, an outdoor segment label
+ * when the phone walks through a door (button as fallback), manual
  * openings by tapping four corners, and the guided vista pass whose targets
  * are the directions visible through the openings it covers.
  */
@@ -26,7 +26,9 @@ import {
   doorwayStep,
   type DoorwayState,
   floorHeight,
+  imageFraction,
   lumaSamples,
+  MAX_VOTE_FRACTION,
   manualOpening,
   mergeOpenings,
   missingVistas,
@@ -61,6 +63,7 @@ export function useVistaCapture(recording: boolean, size: { width: number; heigh
   const floorY = useRef<number | null>(null);
   const indoorPath = useRef<Vec3[]>([]);
   const lastPos = useRef<Vec3 | null>(null);
+  const poseRef = useRef<PosePayload | null>(null);
   const outdoorRef = useRef(false);
   const busyRef = useRef(false);
   const wantOutdoor = useRef(false);
@@ -105,7 +108,7 @@ export function useVistaCapture(recording: boolean, size: { width: number; heigh
       outdoorRef.current = toOutdoor;
       setOutdoor(toOutdoor);
     } catch (e: any) {
-      Alert.alert('Pozlama değiştirilemedi', e?.message ?? String(e));
+      Alert.alert('Bölüm değiştirilemedi', e?.message ?? String(e));
     } finally {
       busyRef.current = false;
       setSegmentBusy(false);
@@ -116,6 +119,7 @@ export function useVistaCapture(recording: boolean, size: { width: number; heigh
   useEffect(
     () =>
       onPose((p) => {
+        poseRef.current = p;
         setPose(p);
         if (!recording) return;
         const cur = pos(p.transform);
@@ -153,10 +157,16 @@ export function useVistaCapture(recording: boolean, size: { width: number; heigh
         const fy = floorHeight(splitPoints(flat).floor, indoorPath.current);
         if (fy !== null) floorY.current = fy;
         let list = mergeOpenings(openingsRef.current, flat, roomCentre());
-        // Inside/outside vote only under the room's locked exposure.
+        // Inside/outside vote only from the room side and only for glass that is
+        // a small part of the frame: auto exposure is then set by the room.
         const here = lastPos.current;
-        if (!outdoorRef.current && here && !busyRef.current) {
-          const near = list.filter((o) => dist(o.centre, here) <= LUMA_RANGE_M);
+        const cam = poseRef.current;
+        if (!outdoorRef.current && here && cam && !busyRef.current) {
+          const near = list.filter(
+            (o) =>
+              dist(o.centre, here) <= LUMA_RANGE_M &&
+              imageFraction(o, here, cam.focal, cam.imageWidth, cam.imageHeight) <= MAX_VOTE_FRACTION
+          );
           if (near.length) {
             const pts = near.flatMap((o) => lumaSamples(o).flat());
             const luma = sampleLuma(pts);

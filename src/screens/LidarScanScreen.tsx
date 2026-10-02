@@ -341,11 +341,11 @@ export default function LidarScanScreen({ navigation }: Props) {
                   : v.addTaps
                     ? `Açıklık ekle: çerçevenin 4 köşesine sırayla dokun (${v.addTaps.length}/4).`
                     : v.segmentBusy
-                      ? 'Pozlama ayarlanıyor, bir saniye sabit tut…'
+                      ? 'Bir saniye…'
                       : v.outdoor && recording
-                        ? 'Dışarıdasın (ayrı pozlama). Zemini ve korkuluğu tara, sonra dönüp cepheyi tara.'
+                        ? 'Dışarıdasın. Zemini ve korkuluğu tara, sonra dönüp cepheyi tara.'
                         : !recording
-                ? "Telefonu göğüs hizasında, normal aydınlık bir yere çevirip Başlat'a bas: pozlama ve yükseklik o anda sabitlenir. Sonra yeşil oku takip et; telefon titrerse yüksekliğe geri dön."
+                ? "Telefonu göğüs hizasında tutup Başlat'a bas: yükseklik o anda sabitlenir. Sonra yeşil oku takip et; telefon titrerse yüksekliğe geri dön."
                 : storageFull
                   ? 'Kayıt sınırına ulaşıldı. Durdur ve Yükle ile taramayı tamamla.'
                   : thermalState >= 3
