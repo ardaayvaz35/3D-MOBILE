@@ -42,7 +42,6 @@ import {
 type Role = 'vista' | 'control';
 const LUMA_RANGE_M = 6; // glass further than this is too small in the image to vote
 const PATH_STEP_M = 0.25;
-const SEGMENT_COOLDOWN_S = 3;
 
 const pos = (T: number[]): Vec3 => [T[12], T[13], T[14]];
 const fwdOf = (T: number[]): Vec3 => [-T[8], -T[9], -T[10]];
@@ -64,7 +63,7 @@ export function useVistaCapture(recording: boolean, size: { width: number; heigh
   const lastPos = useRef<Vec3 | null>(null);
   const outdoorRef = useRef(false);
   const busyRef = useRef(false);
-  const lastSegmentT = useRef(0);
+  const wantOutdoor = useRef(false);
   const doorway = useRef<DoorwayState>({ pending: null });
   const vistaRoleRef = useRef<Role | null>(null);
   const vistaId = useRef('');
@@ -89,6 +88,7 @@ export function useVistaCapture(recording: boolean, size: { width: number; heigh
     indoorPath.current = [];
     lastPos.current = null;
     doorway.current = { pending: null };
+    wantOutdoor.current = false;
     outdoorRef.current = false;
     setOutdoor(false);
     vistaRoleRef.current = null;
@@ -104,7 +104,6 @@ export function useVistaCapture(recording: boolean, size: { width: number; heigh
       await beginSegment(toOutdoor);
       outdoorRef.current = toOutdoor;
       setOutdoor(toOutdoor);
-      lastSegmentT.current = Date.now() / 1000;
     } catch (e: any) {
       Alert.alert('Pozlama değiştirilemedi', e?.message ?? String(e));
     } finally {
@@ -129,12 +128,13 @@ export function useVistaCapture(recording: boolean, size: { width: number; heigh
             if (path.length > 2000) path.splice(0, path.length - 2000);
           }
         }
-        if (!prev || vistaRoleRef.current || busyRef.current || p.paused) return;
-        if (Date.now() / 1000 - lastSegmentT.current < SEGMENT_COOLDOWN_S) return;
+        if (!prev || vistaRoleRef.current) return;
+        // Followed even while a switch is metering, so a quick out-and-back is
+        // never missed; the wanted side is applied as soon as the camera is free.
         const step = doorwayStep(doorway.current, prev, cur, openingsRef.current, floorY.current);
         doorway.current = step.state;
-        if (step.switchTo === 'out' && !outdoorRef.current) void switchSegment(true);
-        if (step.switchTo === 'in' && outdoorRef.current) void switchSegment(false);
+        if (step.switchTo) wantOutdoor.current = step.switchTo === 'out';
+        if (!busyRef.current && wantOutdoor.current !== outdoorRef.current) void switchSegment(wantOutdoor.current);
       }),
     [recording]
   );
@@ -325,7 +325,10 @@ export function useVistaCapture(recording: boolean, size: { width: number; heigh
     vistaTotal,
     vistaGuide,
     addTaps,
-    toggleOutdoor: () => switchSegment(!outdoorRef.current),
+    toggleOutdoor: () => {
+      wantOutdoor.current = !outdoorRef.current;
+      return switchSegment(wantOutdoor.current);
+    },
     openVista,
     closeVista,
     shootControl,

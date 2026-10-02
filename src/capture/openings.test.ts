@@ -142,7 +142,7 @@ test('hint JSON carries the decisions', () => {
   assert.ok(CLS_FLOOR > 0);
 });
 
-test('doorway: leaning out through the door does not switch, walking out and back in does', () => {
+test('doorway: 10 cm past the door switches, jitter at the plane does not', () => {
   const [door] = mergeOpenings([], wall(CLS_DOOR, -0.45, 0.45, 0, 2.1), ROOM);
   const ops = [door];
   const walk = (zs: number[]) => {
@@ -156,8 +156,9 @@ test('doorway: leaning out through the door does not switch, walking out and bac
     return out.filter(Boolean);
   };
   // door plane at z = -3, outside is z < -3
-  assert.deepEqual(walk([-2.6, -2.9, -3.2, -3.4, -3.1, -2.8, -2.5]), []); // phone held 40 cm out, pulled back
-  assert.deepEqual(walk([-2.6, -2.9, -3.2, -3.5, -3.8]), ['out']);
+  assert.deepEqual(walk([-2.9, -3.05, -2.95, -3.04, -2.9]), []); // wobbling 5 cm around the plane
+  assert.deepEqual(walk([-2.6, -2.9, -3.2, -3.4, -3.1, -2.8, -2.5]), ['out', 'in']); // held out, pulled back
+  assert.deepEqual(walk([-2.95, -3.05, -3.12]), ['out']);
   assert.deepEqual(walk([-3.8, -3.2, -2.9, -2.6, -2.2]), ['in']);
   assert.deepEqual(walk([-2.0, -2.5, -2.9, -2.95]), []); // close to the glass, never through
   // a window (sill at 1 m) is never walked through

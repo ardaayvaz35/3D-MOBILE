@@ -256,8 +256,12 @@ export function crossing(prev: Vec3, cur: Vec3, o: Opening, margin = 0.25): 'out
   return s1 >= 0 ? 'out' : 'in';
 }
 
-/** Past the doorway by this much before the segment switches (leaning out is not going out). */
-export const COMMIT_M = 0.6;
+/**
+ * Past the doorway by this much before the segment switches. Small on
+ * purpose: a phone held out through the door does switch, but pulling it
+ * back switches again and restores the room's exposure exactly.
+ */
+export const COMMIT_M = 0.1;
 
 export type DoorwayState = { pending: { id: string; dir: 'out' | 'in' } | null };
 
@@ -265,7 +269,7 @@ export type DoorwayState = { pending: { id: string; dir: 'out' | 'in' } | null }
  * Walking through a door, step by step. Passing through a traversable
  * opening's rectangle only arms a switch; it fires once the phone is
  * COMMIT_M beyond the door plane, and is dropped if the phone comes back to
- * the side it started on (phone held out through the door, then pulled back).
+ * the side it started on first (jitter right at the door plane).
  * Decided by position alone, never by brightness: a bright spot inside the
  * room keeps the room's exposure.
  */
