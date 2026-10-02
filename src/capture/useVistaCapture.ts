@@ -62,6 +62,7 @@ export function useVistaCapture(recording: boolean, size: { width: number; heigh
   const openingsRef = useRef<Opening[]>([]);
   const floorY = useRef<number | null>(null);
   const indoorPath = useRef<Vec3[]>([]);
+  const floorPts = useRef<Vec3[]>([]);
   const lastPos = useRef<Vec3 | null>(null);
   const poseRef = useRef<PosePayload | null>(null);
   const outdoorRef = useRef(false);
@@ -89,6 +90,7 @@ export function useVistaCapture(recording: boolean, size: { width: number; heigh
     putOpenings([]);
     floorY.current = null;
     indoorPath.current = [];
+    floorPts.current = [];
     lastPos.current = null;
     doorway.current = { pending: null };
     wantOutdoor.current = false;
@@ -154,7 +156,9 @@ export function useVistaCapture(recording: boolean, size: { width: number; heigh
       try {
         const flat = await classifiedPoints();
         if (!alive) return;
-        const fy = floorHeight(splitPoints(flat).floor, indoorPath.current);
+        const floor = splitPoints(flat).floor;
+        floorPts.current = floor;
+        const fy = floorHeight(floor, indoorPath.current);
         if (fy !== null) floorY.current = fy;
         let list = mergeOpenings(openingsRef.current, flat, roomCentre());
         // Inside/outside vote only from the room side and only for glass that is
@@ -347,5 +351,9 @@ export function useVistaCapture(recording: boolean, size: { width: number; heigh
     onTap,
     prepareStop,
     tapsActive: vistaRole !== null || addTaps !== null,
+    /** Shared with object mode (walk arrow on the floor, see useObjectMode). */
+    floorY: () => floorY.current,
+    floorPoints: () => floorPts.current,
+    walkedPath: () => indoorPath.current,
   };
 }

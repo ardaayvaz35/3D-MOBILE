@@ -21,6 +21,7 @@ class FrameExporter {
                 segments: [[String: Any]] = [],
                 vistas: [[String: Any]] = [],
                 openingsHint: [String: Any]? = nil,
+                objects: [String: Any]? = nil,
                 openingFaces: [[Float]] = [],
                 faceClasses: [String: String] = [:]) throws {
         let workDir = captureDir
@@ -82,6 +83,7 @@ class FrameExporter {
                 "process_ms": (frame.processMs * 10).rounded() / 10,
                 "segment": frame.segment,
             ]
+            if let id = frame.objectId { meta["object_id"] = id }
             // ISO, white-balance gains (R, G, B) and their temperature/tint:
             // what the server needs to bring every frame to one scale.
             if let c = frame.camera {
@@ -130,6 +132,12 @@ class FrameExporter {
             metadata["openings_hint_path"] = "openings_hint.json"
         }
 
+        if let objects = objects {
+            // worker/object_lock.py reads it from the archive root (spec §3.8).
+            let data = try JSONSerialization.data(withJSONObject: objects, options: .prettyPrinted)
+            try data.write(to: workDir.appendingPathComponent("objects.json"))
+            metadata["objects_path"] = "objects.json"
+        }
         let metaJSON = workDir.appendingPathComponent("metadata.json")
         let jsonData = try JSONSerialization.data(withJSONObject: metadata, options: .prettyPrinted)
         try jsonData.write(to: metaJSON)

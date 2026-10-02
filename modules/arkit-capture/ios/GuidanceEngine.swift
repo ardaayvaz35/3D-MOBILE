@@ -51,6 +51,12 @@ final class GuidanceEngine {
 
     // ARKit delegate thread only.
     private(set) var lockedHeight: Float?
+    /// Object mode and the black transition screens (spec §3.5-3.6): the
+    /// height is free, so no haptics and every height counts as in band. The
+    /// deviation is still reported -- the way back to room mode needs it.
+    var heightFree = false {
+        didSet { if heightFree && buzzing { buzzing = false; haptics.set(active: false, deviation: 0) } }
+    }
     private var startTime: TimeInterval?
     private var outsideSince: TimeInterval?
     private var buzzing = false
@@ -78,6 +84,7 @@ final class GuidanceEngine {
     /// True when a camera at height `y` is inside the band (for the ledger:
     /// frames outside it do not count as good angles).
     func isInBand(_ y: Float) -> Bool {
+        if heightFree { return false }  // object frames do not count as room angles
         guard let h = lockedHeight else { return true }
         return abs(y - h) <= Self.bandMeters
     }
@@ -96,10 +103,13 @@ final class GuidanceEngine {
             startTime = time
         }
         let deviation = position.y - (lockedHeight ?? position.y)
-        let inBand = abs(deviation) <= Self.bandMeters
+        let inBand = heightFree || abs(deviation) <= Self.bandMeters
 
         let wasBuzzing = buzzing
-        if !inBand {
+        if heightFree {
+            buzzing = false
+            outsideSince = nil
+        } else if !inBand {
             if outsideSince == nil { outsideSince = time }
             if let since = outsideSince, time - since >= Self.bandDelay { buzzing = true }
         } else {
@@ -172,6 +182,7 @@ final class GuidanceEngine {
             "progress": Double(progressNow),
             "done": done,
             "heightDeviation": Double(deviation),
+            "heightFree": heightFree,
             "inBand": inBand,
             "buzzing": buzzing,
             "focal": Double(focal),

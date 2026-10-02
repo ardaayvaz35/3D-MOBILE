@@ -14,6 +14,11 @@ final class ArkitSessionHost: NSObject, ARSessionDelegate {
     /// True while a recording is running, i.e. while the overlay should show
     /// coverage colours instead of the plain scanning mesh.
     var coverageActive = false
+    /// The coloured coverage cells are no longer drawn (spec 2026-10-02 §3.2:
+    /// users read them as random, and 28 % of the worst places were green).
+    /// CoverageMap keeps running underneath to pick the arrow's targets.
+    static let paintCoverage = false
+    var paintsCoverage: Bool { coverageActive && Self.paintCoverage }
     var onFrame: ((ARFrame) -> Void)?
     var onTrackingStateChange: ((ARCamera.TrackingState) -> Void)?
     private(set) var isRunning = false
@@ -105,6 +110,14 @@ final class ArkitSessionHost: NSObject, ARSessionDelegate {
             if self.isRunning { self.session.run(self.makeConfiguration()) }
         }
         if Thread.isMainThread { apply() } else { DispatchQueue.main.sync(execute: apply) }
+    }
+
+    /// Re-applies our LiDAR configuration without reset options, so tracking
+    /// and the world origin carry on (used when RoomPlan is switched off; see
+    /// ObjectFinder).
+    func rerunConfiguration() {
+        let apply = { if self.isRunning { self.session.run(self.makeConfiguration()) } }
+        if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
     }
 
     /// Balances `start()`. The session only actually stops once the last
@@ -437,9 +450,43 @@ final class ArkitSessionHost: NSObject, ARSessionDelegate {
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
         onFrame?(frame)
+        chainedDelegate?.session?(session, didUpdate: frame)
     }
 
     func session(_ session: ARSession, cameraDidChangeTrackingState camera: ARCamera) {
         onTrackingStateChange?(camera.trackingState)
+        chainedDelegate?.session?(session, cameraDidChangeTrackingState: camera)
+    }
+
+    // MARK: Sharing the session with RoomPlan
+
+    /// RoomPlan, run on this session (ObjectFinder), may install itself as the
+    /// session's delegate; our frames would then stop arriving. We take the
+    /// delegate back and pass every callback on to RoomPlan's, so both see
+    /// the same frames: the two we implement explicitly above, the rest by
+    /// Objective-C forwarding.
+    private weak var chainedDelegate: ARSessionDelegate?
+
+    /// Main thread. Call after RoomPlan starts (and again a moment later).
+    func reclaimDelegate() {
+        guard let current = session.delegate, current !== self else { return }
+        chainedDelegate = current
+        session.delegate = self
+        print("[objects] session delegate reclaimed; RoomPlan's is chained")
+    }
+
+    /// Main thread. RoomPlan stopped.
+    func releaseChainedDelegate() {
+        chainedDelegate = nil
+    }
+
+    override func responds(to aSelector: Selector!) -> Bool {
+        if super.responds(to: aSelector) { return true }
+        return chainedDelegate?.responds(to: aSelector) ?? false
+    }
+
+    override func forwardingTarget(for aSelector: Selector!) -> Any? {
+        if let c = chainedDelegate, c.responds(to: aSelector) { return c }
+        return super.forwardingTarget(for: aSelector)
     }
 }

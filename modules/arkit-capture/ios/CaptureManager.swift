@@ -59,6 +59,8 @@ class CaptureManager {
         let bytes: Int
         /// Exposure segment the frame was taken in (0 = room, spec §4).
         let segment: Int
+        /// Object whose walk-around this frame belongs to; nil = room frame.
+        let objectId: String?
     }
 
     struct ExportResult {
@@ -209,12 +211,42 @@ class CaptureManager {
     private var openingsHint: [String: Any]?
     private let onPose: ([String: Any]) -> Void
 
+    // Object mode (spec 2026-10-02-uygulama-mimarisi.md §3.3-3.6). The mode
+    // machine lives in JS (src/capture/objectMode.ts); native only tags frames,
+    // frees the height and pauses frames on the black transition screens.
+    // Main thread.
+    private var captureMode = "room"
+    private var objectId: String?
+    /// Boxes the user scanned, ARKit world, as objects.json wants them.
+    private var objectBoxes: [[String: Any]] = []
+    private var finder: ObjectFinder?
+    private let onObjects: ([String: Any]) -> Void
+
     init(onFrame: @escaping (Int, Double, Int, Bool, Bool, Int) -> Void,
          onGuidance: @escaping ([String: Any]) -> Void,
-         onPose: @escaping ([String: Any]) -> Void) {
+         onPose: @escaping ([String: Any]) -> Void,
+         onObjects: @escaping ([String: Any]) -> Void) {
         self.onFrame = onFrame
         self.onGuidance = onGuidance
         self.onPose = onPose
+        self.onObjects = onObjects
+    }
+
+    /// "room" | "object" | "paused" (black transition screen: the session
+    /// keeps tracking, frames are not kept).
+    func setCaptureMode(_ mode: String, objectId: String?) {
+        let apply = {
+            self.captureMode = mode
+            self.objectId = mode == "object" ? objectId : nil
+            self.guidance?.heightFree = mode != "room"
+        }
+        if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
+    }
+
+    /// The boxes of the objects scanned in object mode (JS sends the final list).
+    func setObjectBoxes(_ boxes: [[String: Any]]) {
+        let apply = { self.objectBoxes = boxes }
+        if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
     }
 
     /// Yukleme butcesinin ne kadari kullanildi (0..1).
@@ -265,6 +297,12 @@ class CaptureManager {
         ArkitSessionHost.shared.coverageActive = true
         guidance?.shutdown()
         guidance = GuidanceEngine(coverage: ArkitSessionHost.shared.coverage, emit: onGuidance)
+        captureMode = "room"
+        objectId = nil
+        objectBoxes = []
+        let finder = ObjectFinder(emit: onObjects)
+        self.finder = finder
+        DispatchQueue.main.async { finder.start() }
         isRecording = true
         recordingStart = Date()
         ArkitSessionHost.shared.onFrame = { [weak self] frame in
@@ -287,6 +325,15 @@ class CaptureManager {
         stateLock.unlock()
         ArkitSessionHost.shared.unlockExposureAndWhiteBalance()
         ArkitSessionHost.shared.coverageActive = false
+        let finderFacts: [String: Any]
+        if let f = finder {
+            if Thread.isMainThread { f.stop() } else { DispatchQueue.main.sync { f.stop() } }
+            finderFacts = f.facts
+        } else {
+            finderFacts = ["status": "off"]
+        }
+        finder = nil
+        let boxes = objectBoxes
         guidance?.shutdown()
         let lockedHeight = guidance?.lockedHeight
         guidance = nil
@@ -340,6 +387,22 @@ class CaptureManager {
             "frames_in_height_band": inBandCount,
         ]
         if let h = lockedHeight { stats["locked_height_m"] = Double(h) }
+        stats["object_finder"] = finderFacts
+
+        // objects.json (worker/object_lock.py): the boxes scanned in object
+        // mode and the frames of their walk-arounds. Only boxes that got frames.
+        var objectsDoc: [String: Any]? = nil
+        let objectFrames = savedFrames.filter { $0.objectId != nil }
+        let scannedIds = Set(objectFrames.compactMap { $0.objectId })
+        let keptBoxes = boxes.filter { scannedIds.contains(($0["id"] as? String) ?? "") }
+        if !keptBoxes.isEmpty {
+            let keptIds = Set(keptBoxes.compactMap { $0["id"] as? String })
+            objectsDoc = [
+                "objects": keptBoxes,
+                "object_frames": objectFrames.filter { keptIds.contains($0.objectId ?? "") }.map { $0.index },
+                "eval_frames": [Int](),
+            ]
+        }
 
         let exporter = FrameExporter()
         try exporter.export(frames: savedFrames, meshVertices: meshVertices,
@@ -347,6 +410,7 @@ class CaptureManager {
                             captureStats: stats,
                             segments: segments, vistas: vistas,
                             openingsHint: openingsHint,
+                            objects: objectsDoc,
                             openingFaces: openingFaces,
                             faceClasses: [
                                 String(ARMeshClassification.window.rawValue): "window",
@@ -361,6 +425,10 @@ class CaptureManager {
     }
 
     func teardown() {
+        if let f = finder {
+            if Thread.isMainThread { f.stop() } else { DispatchQueue.main.sync { f.stop() } }
+            finder = nil
+        }
         ArkitSessionHost.shared.onFrame = nil
         guidance?.shutdown()
         guidance = nil
@@ -396,7 +464,8 @@ class CaptureManager {
             "imageHeight": Double(frame.camera.imageResolution.height),
             "trackingNormal": normal,
             "segment": currentSegment,
-            "paused": framesPaused,
+            "paused": framesPaused || captureMode == "paused",
+            "mode": captureMode,
         ])
     }
 
@@ -472,8 +541,9 @@ class CaptureManager {
     private func handle(frame: ARFrame) {
         guard isRecording else { return }
         recordRoomSegmentIfNeeded()
+        finder?.frameTick(hasDepth: (frame.smoothedSceneDepth ?? frame.sceneDepth) != nil, time: frame.timestamp)
         emitPose(frame)
-        if framesPaused { return }
+        if framesPaused || captureMode == "paused" { return }
 
         // Require an active LiDAR depth frame: it is the cheapest available
         // proof that tracking is healthy this instant, and it is data we keep
@@ -607,6 +677,7 @@ class CaptureManager {
         let lightTemperature = light.map { Double($0.ambientColorTemperature) }
 
         let segmentNow = currentSegment
+        let objectNow = captureMode == "object" ? objectId : nil
         workQueue.async { [weak self] in
             guard let self = self else { return }
             defer { self.endWork() }
@@ -617,7 +688,8 @@ class CaptureManager {
                             exposureOffset: exposureOffset, camera: camera,
                             lightIntensity: lightIntensity, lightTemperature: lightTemperature,
                             thermalState: thermal,
-                            coverage: coverageNow, inBand: inBand, segment: segmentNow)
+                            coverage: coverageNow, inBand: inBand, segment: segmentNow,
+                            objectId: objectNow)
         }
     }
 
@@ -664,7 +736,7 @@ class CaptureManager {
                             exposureOffset: Float, camera: ArkitSessionHost.CameraSettings?,
                             lightIntensity: Double?, lightTemperature: Double?,
                             thermalState: Int, coverage: Double,
-                            inBand: Bool, segment: Int) {
+                            inBand: Bool, segment: Int, objectId: String?) {
         let started = CACurrentMediaTime()
         let rgbImage = CIImage(cvPixelBuffer: pixelBuffer)
 
@@ -789,7 +861,8 @@ class CaptureManager {
             thermalState: thermalState,
             processMs: processMs,
             bytes: bytesWritten,
-            segment: segment
+            segment: segment,
+            objectId: objectId
         ))
         let countNow = frameCount
         let bytesNow = imageBytesUsed

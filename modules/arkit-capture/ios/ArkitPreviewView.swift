@@ -257,7 +257,7 @@ class ArkitPreviewView: ExpoView, ARSCNViewDelegate {
         pendingLock.unlock()
         if alreadyPending { return }
 
-        let coverage = ArkitSessionHost.shared.coverageActive
+        let coverage = ArkitSessionHost.shared.paintsCoverage
         overlayQueue.async { [weak self, weak node] in
             guard let self = self else { return }
             let pair = coverage ? self.coverageGeometries(from: meshAnchor) : nil
@@ -334,7 +334,7 @@ class ArkitPreviewView: ExpoView, ARSCNViewDelegate {
     func renderer(_ renderer: SCNSceneRenderer, didUpdate node: SCNNode, for anchor: ARAnchor) {
         guard let meshAnchor = anchor as? ARMeshAnchor else { return }
         let now = CACurrentMediaTime()
-        let interval = !ArkitSessionHost.shared.coverageActive ? Self.minRebuildInterval
+        let interval = !ArkitSessionHost.shared.paintsCoverage ? Self.minRebuildInterval
             : (Self.phoneIsHot ? Self.hotRebuildInterval : Self.coverageRebuildInterval)
         if let last = lastRebuild[anchor.identifier], now - last < interval {
             return
@@ -358,7 +358,7 @@ class ArkitPreviewView: ExpoView, ARSCNViewDelegate {
 
     func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
         let refreshInterval = Self.phoneIsHot ? Self.hotRefreshInterval : Self.coverageRefreshInterval
-        guard ArkitSessionHost.shared.coverageActive,
+        guard ArkitSessionHost.shared.paintsCoverage,
               time - lastCoverageRefresh >= refreshInterval else { return }
         lastCoverageRefresh = time
         let anchors = ArkitSessionHost.shared.currentMeshAnchors()

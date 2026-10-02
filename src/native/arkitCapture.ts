@@ -3,6 +3,7 @@ import type {
   CaptureResult,
   FrameCapturedPayload,
   GuidancePayload,
+  ObjectsPayload,
   PosePayload,
   VideoFormat,
   VistaShotResult,
@@ -28,6 +29,9 @@ type NativeModuleShape = {
   startVista(role: string): string;
   captureVistaShot(): Promise<VistaShotResult>;
   endVista(openingIds: string[]): Promise<number>;
+  setCaptureMode(mode: string, objectId: string | null): void;
+  setObjectBoxes(json: string): void;
+  addListener(eventName: 'onObjects', listener: (payload: ObjectsPayload) => void): { remove: () => void };
   addListener(eventName: 'onPose', listener: (payload: PosePayload) => void): { remove: () => void };
   addListener(
     eventName: 'onFrameCaptured',
@@ -138,7 +142,7 @@ export function cancelWindowScan(): void {
   nativeModule?.cancelWindowScan();
 }
 
-/** New exposure segment: outdoor meters and locks, indoor restores the room's. */
+/** New segment label (indoor / outdoor); exposure stays automatic. */
 export function beginSegment(outdoor: boolean): Promise<number> {
   return requireModule().beginSegment(outdoor);
 }
@@ -172,7 +176,7 @@ export function captureVistaShot(): Promise<VistaShotResult> {
   return requireModule().captureVistaShot();
 }
 
-/** Closes the photo set, restores the segment exposure, resumes frames. */
+/** Closes the photo set, returns to auto exposure, resumes frames. */
 export function endVista(openingIds: string[]): Promise<number> {
   return requireModule().endVista(openingIds);
 }
@@ -180,6 +184,27 @@ export function endVista(openingIds: string[]): Promise<number> {
 export function onPose(listener: (payload: PosePayload) => void): () => void {
   if (!nativeModule) return () => {};
   const subscription = nativeModule.addListener('onPose', listener);
+  return () => subscription.remove();
+}
+
+/**
+ * Object mode (spec 2026-10-02-uygulama-mimarisi.md §3.3-3.6): "room" keeps
+ * the height lock; "object" tags frames with the object and frees the height;
+ * "paused" is the black transition screen (tracking runs, no frames kept).
+ */
+export function setCaptureMode(mode: 'room' | 'object' | 'paused', objectId: string | null = null): void {
+  nativeModule?.setCaptureMode(mode, objectId);
+}
+
+/** Boxes of the scanned objects (ARKit world), written into objects.json at export. */
+export function setObjectBoxes(boxes: object[]): void {
+  nativeModule?.setObjectBoxes(JSON.stringify(boxes));
+}
+
+/** RoomPlan's furniture boxes and walls, about once a second while recording. */
+export function onObjects(listener: (payload: ObjectsPayload) => void): () => void {
+  if (!nativeModule) return () => {};
+  const subscription = nativeModule.addListener('onObjects', listener);
   return () => subscription.remove();
 }
 

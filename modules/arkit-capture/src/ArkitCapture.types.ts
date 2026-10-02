@@ -2,6 +2,7 @@ export type ArkitCaptureModuleEvents = {
   onFrameCaptured: (payload: FrameCapturedPayload) => void;
   onGuidance: (payload: GuidancePayload) => void;
   onPose: (payload: PosePayload) => void;
+  onObjects: (payload: ObjectsPayload) => void;
 };
 
 export type FrameCapturedPayload = {
@@ -74,6 +75,8 @@ export type GuidancePayload = {
   done: boolean;
   /** Metres above (+) or below (-) the height locked at start. */
   heightDeviation: number;
+  /** Object mode / transition screen: no height lock, no haptics. */
+  heightFree?: boolean;
   inBand: boolean;
   buzzing: boolean;
   /** Full-image focal length (px) and sensor-landscape image size. */
@@ -101,8 +104,35 @@ export type PosePayload = {
   trackingNormal: boolean;
   /** Exposure segment frames are being recorded in (0 = room). */
   segment: number;
-  /** Frames are not being kept (vista pass or re-metering). */
+  /** Frames are not being kept (vista pass or a black transition screen). */
   paused: boolean;
+  /** Capture mode on the native side. */
+  mode?: 'room' | 'object' | 'paused';
+};
+
+/** One piece of furniture RoomPlan found (ARKit world, metres, +Y up). */
+export type RoomPlanObject = {
+  id: string;
+  category: string;
+  center: [number, number, number];
+  /** Width (box x), height (y), depth (z). */
+  size: [number, number, number];
+  /** Rotation about +Y; box x axis -> (cos, 0, -sin). */
+  yaw_deg: number;
+};
+
+export type RoomPlanWall = {
+  center: [number, number, number];
+  width: number;
+  yaw_deg: number;
+};
+
+export type ObjectsPayload = {
+  /** running | failed | stopped | unavailable (...) | unsupported device */
+  status: string;
+  failure: string;
+  objects: RoomPlanObject[];
+  walls: RoomPlanWall[];
 };
 
 export type VistaShotResult = {

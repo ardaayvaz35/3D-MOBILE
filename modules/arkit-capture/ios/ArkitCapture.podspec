@@ -13,6 +13,9 @@ Pod::Spec.new do |s|
 
   s.dependency 'ExpoModulesCore'
   s.frameworks = 'ARKit', 'AVFoundation', 'CoreVideo', 'Metal'
+  # Weak: RoomPlan is iOS 16+ while the app still opens on 15.1 (ObjectFinder
+  # checks availability at run time).
+  s.weak_frameworks = 'RoomPlan'
 
   # Swift/Objective-C compatibility
   s.pod_target_xcconfig = {

@@ -12,7 +12,8 @@ const BAND_M = 0.07;
 const BAR_H = 160;
 const BAR_RANGE_M = 0.2;
 
-type Props = { g: GuidancePayload; width: number; height: number };
+/** hideHeight: object mode, where the height is free (spec §3.5). */
+type Props = { g: GuidancePayload; width: number; height: number; hideHeight?: boolean };
 
 /** Where the target lands on the aspect-filled portrait preview, or null. */
 function project(g: GuidancePayload, width: number, height: number) {
@@ -52,7 +53,7 @@ export function guidanceHint(g: GuidancePayload, width: number, height: number):
   return turnWord(g.target.right, g.target.up);
 }
 
-export default function GuidanceOverlay({ g, width, height }: Props) {
+export default function GuidanceOverlay({ g, width, height, hideHeight }: Props) {
   const spot = project(g, width, height);
   const t = g.target;
 
@@ -99,10 +100,12 @@ export default function GuidanceOverlay({ g, width, height }: Props) {
       {t ? <View style={[styles.centre, { left: width / 2 - 6, top: height / 2 - 6 }]} /> : null}
       {arrow}
 
-      <View style={[styles.bar, { top: height / 2 - BAR_H / 2 }]}>
-        <View style={[styles.band, { top: BAR_H / 2 - bandH, height: bandH * 2 }]} />
-        <View style={[styles.marker, { top: markerTop, backgroundColor: g.inBand ? '#4ade80' : '#eab308' }]} />
-      </View>
+      {hideHeight ? null : (
+        <View style={[styles.bar, { top: height / 2 - BAR_H / 2 }]}>
+          <View style={[styles.band, { top: BAR_H / 2 - bandH, height: bandH * 2 }]} />
+          <View style={[styles.marker, { top: markerTop, backgroundColor: g.inBand ? '#4ade80' : '#eab308' }]} />
+        </View>
+      )}
     </View>
   );
 }

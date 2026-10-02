@@ -8,7 +8,7 @@ public class ArkitCaptureModule: Module {
   public func definition() -> ModuleDefinition {
     Name("ArkitCapture")
 
-    Events("onFrameCaptured", "onTrackingStateChanged", "onGuidance", "onPose")
+    Events("onFrameCaptured", "onTrackingStateChanged", "onGuidance", "onPose", "onObjects")
 
     Function("isLidarSupported") { () -> Bool in
       ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
@@ -35,6 +35,8 @@ public class ArkitCaptureModule: Module {
           self.sendEvent("onGuidance", payload)
         }, onPose: { payload in
           self.sendEvent("onPose", payload)
+        }, onObjects: { payload in
+          self.sendEvent("onObjects", payload)
         })
       }
       self.captureManager?.startRecording()
@@ -68,6 +70,17 @@ public class ArkitCaptureModule: Module {
         promise.reject("NO_SESSION", "Recording was not started"); return
       }
       DispatchQueue.main.async { m.beginSegment(outdoor: outdoor) { id in promise.resolve(id) } }
+    }
+
+    // Object mode (spec 2026-10-02-uygulama-mimarisi.md §3.3-3.6).
+    Function("setCaptureMode") { (mode: String, objectId: String?) -> Void in
+      self.captureManager?.setCaptureMode(mode, objectId: objectId)
+    }
+
+    Function("setObjectBoxes") { (json: String) -> Void in
+      guard let data = json.data(using: .utf8),
+            let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
+      self.captureManager?.setObjectBoxes(arr)
     }
 
     AsyncFunction("classifiedPoints") { (promise: Promise) in

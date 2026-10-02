@@ -15,7 +15,12 @@ import {
 import type { GuidancePayload } from '../../modules/arkit-capture/src/ArkitCapture.types';
 import GuidanceOverlay, { guidanceHint } from './GuidanceOverlay';
 import OpeningsOverlay from './OpeningsOverlay';
+import ObjectOverlay from './ObjectOverlay';
+import TransitionScreen from './TransitionScreen';
 import { useVistaCapture } from '../capture/useVistaCapture';
+import { FINISH_OFFER, useObjectMode } from '../capture/useObjectMode';
+import { angleDeg, AIM_DEG } from '../capture/objectMode';
+import { toScreen } from '../capture/vistaTargets';
 import { uploadCapture } from '../api/captures';
 import {
   clearPendingUpload,
@@ -56,6 +61,8 @@ export default function LidarScanScreen({ navigation }: Props) {
   const wrapOffset = useRef({ x: 0, y: 0 });
   // Openings, outdoor segment and vista pass (spec 2026-09-30-pencere-manzara-design.md §4).
   const v = useVistaCapture(recording, size);
+  // Object mode: RoomPlan's furniture, walk-arounds, black screens (spec 2026-10-02 §3.3-3.6).
+  const om = useObjectMode(recording, guide, frameCount, v);
 
   // 0.5x measurement: which cameras ARKit world tracking can run on here.
   useEffect(() => {
@@ -140,11 +147,28 @@ export default function LidarScanScreen({ navigation }: Props) {
       setGuide(null);
       setDoneDismissed(false);
       v.reset();
+      om.reset();
       startLidarRecording();
       setRecording(true);
       return;
     }
 
+    // Spec §3.3: the tour does not end before every main piece is walked around.
+    if (om.pendingNames.length > 0 && om.state.kind === 'room') {
+      Alert.alert(
+        'Eşya taraması eksik',
+        `${om.pendingNames.join(', ')} henüz her açıdan çekilmedi. Ok seni yanına götürür. Yine de bitirmek ister misin?`,
+        [
+          { text: 'Geri dön', style: 'cancel' },
+          { text: 'Yine de bitir', style: 'destructive', onPress: () => stopNow() },
+        ]
+      );
+      return;
+    }
+    await stopNow();
+  };
+
+  const stopNow = async () => {
     setRecording(false);
     setGuide(null);
 
@@ -232,7 +256,30 @@ export default function LidarScanScreen({ navigation }: Props) {
   const storageColor = storageFull ? '#f87171' : storagePct > 75 ? '#eab308' : '#4ade80';
   const guiding = recording && guide !== null;
   const progressPct = guide ? Math.round(guide.progress * 100) : 0;
-  const showDone = guiding && !!guide?.done && !doneDismissed;
+  const showDone = guiding && !!guide?.done && !doneDismissed && om.pendingNames.length === 0 && om.state.kind === 'room';
+  const inObject = om.state.kind === 'object';
+  // Object mode: the camera arrow aims at the piece; no height bar (height is free).
+  const objectGuide: GuidancePayload | null =
+    inObject && om.aim && v.pose
+      ? (() => {
+          const T = v.pose.transform;
+          const d: [number, number, number] = [om.aim[0] - T[12], om.aim[1] - T[13], om.aim[2] - T[14]];
+          return {
+            mode: 'improve',
+            target: toScreen(d, T),
+            aligned: angleDeg([-T[8], -T[9], -T[10]], d) <= AIM_DEG,
+            hold: 0,
+            progress: om.progress,
+            done: false,
+            heightDeviation: 0,
+            inBand: true,
+            buzzing: false,
+            focal: v.pose.focal,
+            imageWidth: v.pose.imageWidth,
+            imageHeight: v.pose.imageHeight,
+          };
+        })()
+      : null;
 
   return (
     <View style={styles.container}>
@@ -265,8 +312,14 @@ export default function LidarScanScreen({ navigation }: Props) {
             height={size.height}
           />
         ) : null}
-        {!v.vistaRole && !v.addTaps && guiding && guide && size.width > 0 ? (
+        {recording && !v.vistaRole && v.pose && size.width > 0 ? (
+          <ObjectOverlay pose={v.pose} om={om} floorY={v.floorY()} width={size.width} height={size.height} />
+        ) : null}
+        {!v.vistaRole && !v.addTaps && guiding && guide && !inObject && size.width > 0 ? (
           <GuidanceOverlay g={guide} width={size.width} height={size.height} />
+        ) : null}
+        {objectGuide && size.width > 0 ? (
+          <GuidanceOverlay g={objectGuide} width={size.width} height={size.height} hideHeight />
         ) : null}
         {v.vistaGuide && size.width > 0 ? (
           <GuidanceOverlay g={v.vistaGuide} width={size.width} height={size.height} />
@@ -274,7 +327,10 @@ export default function LidarScanScreen({ navigation }: Props) {
 
         <View style={styles.overlay}>
           <View style={styles.topBar}>
-            <Text style={styles.counter}>{frameCount} kare</Text>
+            <Text style={styles.counter}>
+              {frameCount} kare
+              {inObject ? ` · ${om.currentName} %${Math.round(om.progress * 100)}` : ''}
+            </Text>
             {guiding ? (
               <View style={styles.coverageRow}>
                 <View style={styles.coverageTrack}>
@@ -354,13 +410,22 @@ export default function LidarScanScreen({ navigation }: Props) {
                     ? 'Telefon ısınıyor: kare hızı ve renk güncellemesi yavaşlatıldı. Mümkünse taramayı kısa tut.'
                   : tooFast
                     ? 'YAVAŞLA — telefon çok hızlı, kareler bulanık çıkıyor ve kaydedilmiyor.'
+                  : om.hint
+                    ? om.hint
                   : guiding && guide
                     ? guidanceHint(guide, size.width, size.height)
                     : coverageOk
                       ? 'İyi gidiyor. Mavi ve sarı kalan yerlere 1-3 m uzaktan, başka bir noktadan bak; yaklaşmak sayılmaz.'
                       : 'Ağ renkleri: mavi henüz iyi değil, yeşil tamam, gri LiDAR ölçemiyor (cam, ayna).'}
             </Text>
-            {recording && !v.vistaRole && !v.addTaps ? (
+            {recording && inObject && om.progress >= FINISH_OFFER ? (
+              <View style={styles.actionRow}>
+                <Pressable style={styles.smallButton} onPress={om.finishCurrent}>
+                  <Text style={styles.smallText}>{om.currentName} tamam</Text>
+                </Pressable>
+              </View>
+            ) : null}
+            {recording && !inObject && !v.vistaRole && !v.addTaps ? (
               <View style={styles.actionRow}>
                 <Pressable style={styles.smallButton} onPress={v.toggleOutdoor} disabled={v.segmentBusy || busy}>
                   <Text style={styles.smallText}>{v.outdoor ? 'İçeri giriyorum' : 'Dışarı çıkıyorum'}</Text>
@@ -403,6 +468,7 @@ export default function LidarScanScreen({ navigation }: Props) {
             </Pressable>
           </View>
         </View>
+        {om.black ? <TransitionScreen {...om.black} /> : null}
       </View>
     </View>
   );
