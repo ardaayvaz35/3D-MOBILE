@@ -458,6 +458,22 @@ final class ArkitSessionHost: NSObject, ARSessionDelegate {
         chainedDelegate?.session?(session, cameraDidChangeTrackingState: camera)
     }
 
+    /// Last time ARKit added or refined a mesh anchor (CACurrentMediaTime).
+    /// ObjectFinder watches it: RoomPlan's configuration could switch scene
+    /// reconstruction off while depth keeps flowing, which would silently
+    /// lose the mesh seed, the coverage map and the openings.
+    private(set) var lastMeshUpdate: TimeInterval = 0
+
+    func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
+        if anchors.contains(where: { $0 is ARMeshAnchor }) { lastMeshUpdate = CACurrentMediaTime() }
+        chainedDelegate?.session?(session, didAdd: anchors)
+    }
+
+    func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
+        if anchors.contains(where: { $0 is ARMeshAnchor }) { lastMeshUpdate = CACurrentMediaTime() }
+        chainedDelegate?.session?(session, didUpdate: anchors)
+    }
+
     // MARK: Sharing the session with RoomPlan
 
     /// RoomPlan, run on this session (ObjectFinder), may install itself as the

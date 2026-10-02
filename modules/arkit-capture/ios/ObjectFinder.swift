@@ -20,6 +20,10 @@ import RoomPlan
 /// Everything it learns is reported in metadata (`object_finder`).
 final class ObjectFinder: NSObject {
     static let depthGraceSeconds: TimeInterval = 2.0
+    /// No mesh anchor added or refined for this long while RoomPlan runs =
+    /// scene reconstruction is off. ARKit refines visible anchors every few
+    /// frames, so a few seconds of silence is not normal.
+    static let meshGraceSeconds: TimeInterval = 4.0
     static let emitInterval: TimeInterval = 1.0
     /// Mesh vertices a box (grown by 5 cm) must hold to count as real.
     static let minMeshPoints = 30
@@ -82,6 +86,9 @@ final class ObjectFinder: NSObject {
             s.stop(pauseARSession: false)
         }
         #endif
+        // Whatever RoomPlan ran on the session, ours comes back (no reset:
+        // tracking and the world origin carry on).
+        if session != nil { ArkitSessionHost.shared.rerunConfiguration() }
         session = nil
         if status == "running" { status = "stopped" }
     }
@@ -99,15 +106,18 @@ final class ObjectFinder: NSObject {
         let now = CACurrentMediaTime()
         if now - lastDepth > Self.depthGraceSeconds && now - startedAt > Self.depthGraceSeconds {
             fail("no depth frames for \(Self.depthGraceSeconds) s while RoomPlan ran")
+            return
+        }
+        let mesh = ArkitSessionHost.shared.lastMeshUpdate
+        if now - max(mesh, startedAt) > Self.meshGraceSeconds {
+            fail("mesh stopped: no mesh anchor update for \(Self.meshGraceSeconds) s while RoomPlan ran")
         }
     }
 
     private func fail(_ reason: String) {
         failure = reason
-        stop()
+        stop()  // also gives the session back its LiDAR configuration
         status = "failed"
-        // Give the session back its LiDAR configuration; no reset, tracking continues.
-        ArkitSessionHost.shared.rerunConfiguration()
         print("[objects] RoomPlan off: \(reason)")
         send()
     }
