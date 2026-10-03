@@ -4,7 +4,7 @@ import type { RoomPlanObject, RoomPlanWall } from '../../modules/arkit-capture/s
 import {
   aimedAt, approachPoint, AZIMUTHS, blockedByWall, boxCorners, closeDistance, displayName, domeComplete, domeProgress,
   ENTER_AIM_S, ENTER_BLACK_S, exportBox, footprintDistance, makeDome, type ModeState, nativeMode, nextSlice,
-  PHONE_MAX_M, refreshDome, sliceFor, sliceHint, stepMode, wantsOwnScan, type Vec3,
+  PHONE_MAX_M, refreshDome, samePiece, sliceFor, sliceHint, stepMode, wantsOwnScan, type Vec3,
 } from './objectMode.ts';
 
 const near = (a: number, b: number, eps = 1e-6) => assert.ok(Math.abs(a - b) < eps, `${a} != ${b}`);
@@ -191,4 +191,18 @@ test('hint: height asked at the phone own distance, not a fixed far spot', () =>
   assert.equal(sliceHint(s, at(s.cam[1] + 0.3), bed), 'Telefonu biraz indir');
   // Far beyond the spot: walk in first.
   assert.equal(sliceHint(s, [(h[0] / hl) * (hSpot + 1.5), s.cam[1], (h[2] / hl) * (hSpot + 1.5)], bed), 'Biraz yaklaş');
+});
+
+test('a wardrobe (tall storage) is left to the room pass', () => {
+  assert.equal(wantsOwnScan({ ...dresser, size: [1.18, 2.68, 0.65] }), false);
+  assert.equal(wantsOwnScan(dresser), true);
+});
+
+test('same piece under a new RoomPlan id (device test: one desk, 5 ids)', () => {
+  const desk: RoomPlanObject = { id: 'a', category: 'table', center: [3.1, -1.15, 1.19], size: [1.32, 0.9, 0.65], yaw_deg: -120 };
+  const again: RoomPlanObject = { id: 'b', category: 'table', center: [3.01, -1.15, 1.14], size: [1.28, 0.89, 0.6], yaw_deg: -121 };
+  const other: RoomPlanObject = { id: 'c', category: 'table', center: [1.98, -1.15, 0.76], size: [0.91, 0.89, 1.62], yaw_deg: 59 };
+  assert.ok(samePiece(desk, again));
+  assert.ok(!samePiece(desk, other)); // the second desk, 1.2 m away
+  assert.ok(!samePiece(desk, { ...again, category: 'chair' }));
 });

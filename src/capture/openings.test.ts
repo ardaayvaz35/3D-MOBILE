@@ -4,6 +4,7 @@ import {
   CLS_DOOR, CLS_FLOOR, CLS_WINDOW, clusterPoints, crossing, doorwayStep, type DoorwayState, floorHeight, isExterior, isTraversable,
   imageFraction, lumaSamples, manualOpening, MAX_VOTE_FRACTION, mergeOpenings, missingVistas, openingNames, openingsFacing, openingsHint,
   rectFromPoints, visibleTargets, voteExterior, type Opening,
+  EXTERIOR_RATIO, frameSamples,
 } from './openings.ts';
 
 type V = [number, number, number];
@@ -115,7 +116,9 @@ test('openingsFacing picks exterior openings in front of the phone', () => {
   const o = voteExterior(windowAt(-0.5, 0.5), new Array(16).fill(255));
   assert.equal(openingsFacing([o], [0, 0, -1]).length, 1);
   assert.equal(openingsFacing([o], [0, 0, 1]).length, 0);
-  assert.equal(openingsFacing([windowAt(-0.5, 0.5)], [0, 0, -1]).length, 0); // not exterior
+  // Not voted exterior: still a window that way (vista fallback); an exterior one wins.
+  assert.equal(openingsFacing([windowAt(-0.5, 0.5)], [0, 0, -1]).length, 1);
+  assert.deepEqual(openingsFacing([o, { ...windowAt(-0.5, 0.5), id: "x" }], [0, 0, -1]).map((k) => k.id), [o.id]);
 });
 
 test('visible targets: through a window only outward directions within its cone', () => {
@@ -178,4 +181,40 @@ test('doorway: 10 cm past the door switches, jitter at the plane does not', () =
   let st: DoorwayState = { pending: null };
   for (const z of [-2.8, -3.2, -3.8]) st = doorwayStep(st, [0, 1.4, z + 0.4], [0, 1.4, z], win, 0).state;
   assert.equal(st.pending, null);
+});
+
+test('luma votes: glass 1.3x brighter than the frame is exterior though not clipped (auto exposure)', () => {
+  const frame = new Array(25).fill(100);
+  let o = voteExterior(windowAt(-0.5, 0.5), new Array(16).fill(140), frame);
+  assert.equal(isExterior(o), true);
+  o = voteExterior(windowAt(-0.5, 0.5), new Array(16).fill(100 * EXTERIOR_RATIO - 5), frame);
+  assert.equal(isExterior(o), false);
+  // Frame mostly unreadable: only the clip rule.
+  o = voteExterior(windowAt(-0.5, 0.5), new Array(16).fill(140), new Array(25).fill(-1));
+  assert.equal(isExterior(o), false);
+});
+
+test('frame samples land on the image grid (inverse of the pinhole the native sampler uses)', () => {
+  // Camera at (1, 2, 3), identity rotation: looks down world -Z.
+  const T = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 2, 3, 1];
+  const f = 1000, W = 1920, H = 1440;
+  const pts = frameSamples(T, f, W, H);
+  assert.equal(pts.length, 25);
+  for (const [i, p] of pts.entries()) {
+    const c = [p[0] - 1, p[1] - 2, p[2] - 3];
+    const u = (f * c[0]) / -c[2] + W / 2;
+    const v = (f * -c[1]) / -c[2] + H / 2;
+    const fu = [0.1, 0.3, 0.5, 0.7, 0.9][i % 5], fv = [0.1, 0.3, 0.5, 0.7, 0.9][Math.floor(i / 5)];
+    near(u, fu * W, 1e-6); near(v, fv * H, 1e-6);
+  }
+});
+
+test('vista facing: exterior first, else any window that way, never a door', () => {
+  const w = windowAt(-0.5, 0.5);
+  const fwd = w.normal as [number, number, number];
+  assert.deepEqual(openingsFacing([w], fwd).map((o) => o.id), [w.id]); // not voted: window fallback
+  const ext = voteExterior(w, new Array(16).fill(255));
+  assert.deepEqual(openingsFacing([ext], fwd).map((o) => o.id), [ext.id]);
+  assert.deepEqual(openingsFacing([w], [-fwd[0], 0, -fwd[2]]), []); // looking away
+  assert.deepEqual(openingsFacing([{ ...w, kind: 'door' }], fwd), []);
 });

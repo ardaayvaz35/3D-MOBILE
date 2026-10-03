@@ -31,8 +31,31 @@ export const MIN_BASE_M2 = 0.3;
 /** Spec §3.8: grown ~3 cm on every side so the edge of the piece stays inside. */
 export const BOX_PAD_M = 0.03;
 
+/**
+ * Tall storage is a wardrobe: against a wall, shot from the front only, and
+ * often far wider than RoomPlan's box (device test 2026-10-03: a ~5 m
+ * wardrobe came as one 1.18 m box). The room pass covers it; a walk-around
+ * cannot.
+ */
+export const WARDROBE_MIN_H = 1.5;
+
 export function wantsOwnScan(o: RoomPlanObject): boolean {
+  if (o.category === 'storage' && o.size[1] >= WARDROBE_MIN_H) return false;
   return OWN_SCAN.has(o.category) && o.size[0] * o.size[2] > MIN_BASE_M2;
+}
+
+/**
+ * Same piece under a new RoomPlan identifier? RoomPlan re-identifies pieces
+ * while it refines them: device test 2026-10-03 had one desk under 5 ids
+ * (centres within 11 cm), each one asked for again after the last was done.
+ * Same category and the footprint centres within half the smaller piece's
+ * short side (at least 30 cm).
+ */
+export function samePiece(a: RoomPlanObject, b: RoomPlanObject): boolean {
+  if (a.category !== b.category) return false;
+  const d = Math.hypot(a.center[0] - b.center[0], a.center[2] - b.center[2]);
+  const short = Math.min(a.size[0], a.size[2], b.size[0], b.size[2]);
+  return d <= Math.max(0.3, short / 2);
 }
 
 /** Turkish name. RoomPlan says only "storage"; size tells dresser, nightstand and wardrobe apart. */

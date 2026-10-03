@@ -225,15 +225,51 @@ export function imageFraction(o: Opening, eye: Vec3, focal: number, imgW: number
 export const MAX_VOTE_FRACTION = 0.15;
 
 /**
- * One look at the glass while the room sets the (auto) exposure; see
- * imageFraction. `luma` has -1 for samples out of view. Most in-view samples
- * clipped = one "outside" vote.
+ * Glass this much brighter than the frame (medians) looks outside. Measured on
+ * device scan 1791032313077 (auto exposure, day): per look, ratio >= 1.3 in
+ * 71-100% of looks for 8 windows, 13-33% for 3 doors. The old rule (most
+ * glass samples clipped) was made for a locked exposure; under auto exposure
+ * no window reached it (best 31%), so nothing was exterior and the vista pass
+ * fell back to a half sphere that pointed into the room.
  */
-export function voteExterior(o: Opening, luma: number[]): Opening {
+export const EXTERIOR_RATIO = 1.3;
+
+const median = (a: number[]) => {
+  const s = [...a].sort((x, y) => x - y);
+  return s[s.length >> 1];
+};
+
+/**
+ * World points that land on a 5 x 5 grid over the camera image (10-90 %), 1 m
+ * ahead: sampleLuma() of these gives the frame's brightness. T column-major
+ * camera-to-world; ARKit image: u along camera +x, v along camera -y.
+ */
+export function frameSamples(T: number[], focal: number, imgW: number, imgH: number): Vec3[] {
+  const out: Vec3[] = [];
+  for (const fv of [0.1, 0.3, 0.5, 0.7, 0.9]) for (const fu of [0.1, 0.3, 0.5, 0.7, 0.9]) {
+    const c: Vec3 = [((fu - 0.5) * imgW) / focal, (-(fv - 0.5) * imgH) / focal, -1];
+    out.push([
+      T[0] * c[0] + T[4] * c[1] + T[8] * c[2] + T[12],
+      T[1] * c[0] + T[5] * c[1] + T[9] * c[2] + T[13],
+      T[2] * c[0] + T[6] * c[1] + T[10] * c[2] + T[14],
+    ]);
+  }
+  return out;
+}
+
+/**
+ * One look at the glass while the room sets the (auto) exposure; see
+ * imageFraction. `luma` has -1 for samples out of view; `frameLuma` is the
+ * frame grid (frameSamples). An "outside" vote: most glass samples clipped,
+ * or the glass EXTERIOR_RATIO times brighter than the frame.
+ */
+export function voteExterior(o: Opening, luma: number[], frameLuma: number[] = []): Opening {
   const valid = luma.filter((v) => v >= 0);
   if (valid.length < MIN_LUMA_SAMPLES) return o;
   const clip = valid.filter((v) => v >= CLIP_LUMA).length / valid.length;
-  return { ...o, seen: o.seen + 1, clipped: o.clipped + (clip > 0.5 ? 1 : 0) };
+  const frame = frameLuma.filter((v) => v >= 0);
+  const bright = frame.length >= 13 && median(valid) >= EXTERIOR_RATIO * Math.max(1, median(frame));
+  return { ...o, seen: o.seen + 1, clipped: o.clipped + (clip > 0.5 || bright ? 1 : 0) };
 }
 
 export const isExterior = (o: Opening) => o.seen > 0 && o.clipped * 2 >= o.seen;
@@ -317,12 +353,19 @@ export function doorwayStep(
   return { state, switchTo: null };
 }
 
-/** Exterior openings facing the way the phone looks (within 70 deg, level). */
+/**
+ * Exterior openings facing the way the phone looks (within 70 deg, level).
+ * None voted exterior (night, few looks): windows facing that way -- the user
+ * asked for a vista while looking at one; a half sphere around the heading
+ * would point back into the room.
+ */
 export function openingsFacing(openings: Opening[], forward: Vec3): Opening[] {
   const h = Math.hypot(forward[0], forward[2]);
   if (h < 1e-6) return [];
   const f: Vec3 = [forward[0] / h, 0, forward[2] / h];
-  return openings.filter((o) => isExterior(o) && dot(o.normal, f) >= Math.cos((70 * Math.PI) / 180));
+  const facing = openings.filter((o) => dot(o.normal, f) >= Math.cos((70 * Math.PI) / 180));
+  const ext = facing.filter(isExterior);
+  return ext.length ? ext : facing.filter((o) => o.kind === 'window');
 }
 
 const SHOT_PITCHES = [-50, -25, 0, 25, 50];

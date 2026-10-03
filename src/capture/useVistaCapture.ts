@@ -38,6 +38,7 @@ import {
   splitPoints,
   visibleTargets,
   voteExterior,
+  frameSamples,
   type Opening,
 } from './openings';
 
@@ -172,9 +173,11 @@ export function useVistaCapture(recording: boolean, size: { width: number; heigh
               imageFraction(o, here, cam.focal, cam.imageWidth, cam.imageHeight) <= MAX_VOTE_FRACTION
           );
           if (near.length) {
-            const pts = near.flatMap((o) => lumaSamples(o).flat());
+            const frame = frameSamples(cam.transform, cam.focal, cam.imageWidth, cam.imageHeight);
+            const pts = [...near.flatMap((o) => lumaSamples(o).flat()), ...frame.flat()];
             const luma = sampleLuma(pts);
-            const byId = new Map(near.map((o, i) => [o.id, voteExterior(o, luma.slice(i * 16, i * 16 + 16))]));
+            const frameLuma = luma.slice(near.length * 16);
+            const byId = new Map(near.map((o, i) => [o.id, voteExterior(o, luma.slice(i * 16, i * 16 + 16), frameLuma)]));
             list = list.map((o) => byId.get(o.id) ?? o);
           }
         }

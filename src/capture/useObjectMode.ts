@@ -27,6 +27,7 @@ import {
   type ModeState,
   nativeMode,
   nextSlice,
+  samePiece,
   refreshDome,
   RETURN_HINT_AFTER_S,
   type Room,
@@ -84,6 +85,8 @@ export function useObjectMode(
 ) {
   const [, setTick] = useState(0);
   const objects = useRef(new Map<string, RoomPlanObject>());
+  /** RoomPlan id -> the id the piece was first seen under. */
+  const alias = useRef(new Map<string, string>());
   const walls = useRef<RoomPlanWall[]>([]);
   const status = useRef('off');
   const done = useRef(new Set<string>());
@@ -116,6 +119,7 @@ export function useObjectMode(
 
   const reset = () => {
     objects.current.clear();
+    alias.current.clear();
     walls.current = [];
     status.current = 'off';
     done.current.clear();
@@ -139,7 +143,19 @@ export function useObjectMode(
       onObjects((p: ObjectsPayload) => {
         status.current = p.status;
         // Keep a piece RoomPlan stops listing (it was there); refresh the rest.
-        for (const o of p.objects ?? []) objects.current.set(o.id, o);
+        // A piece RoomPlan re-identified keeps its first id: frames, the done
+        // list and objects.json all refer to that one (see samePiece).
+        for (const o of p.objects ?? []) {
+          let id = alias.current.get(o.id) ?? o.id;
+          if (!objects.current.has(id)) {
+            const first = [...objects.current.values()].find((k) => samePiece(k, o));
+            if (first) {
+              id = first.id;
+              alias.current.set(o.id, id);
+            }
+          }
+          objects.current.set(id, { ...o, id });
+        }
         if (p.walls?.length) walls.current = p.walls;
       }),
     []
