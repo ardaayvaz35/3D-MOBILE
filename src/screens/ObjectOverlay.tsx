@@ -88,6 +88,8 @@ function DomeRing({ dome, progress }: { dome: Slice[]; progress: number }) {
   return (
     <View style={styles.ring}>
       {dome.map((s, i) => {
+        // A spot nobody can stand at (wall, other furniture) is not a target.
+        if (!s.reachable && !s.filled) return null;
         const r = R[2 - s.ring]; // near ring (steep) inside
         const a = (s.azimuth * Math.PI) / 180;
         return (

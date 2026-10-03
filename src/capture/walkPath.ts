@@ -83,6 +83,12 @@ export function buildGrid(
   return g;
 }
 
+/** Can a person stand at p (x, z)? Known floor, clear of furniture and walls. */
+export function isFreeAt(g: Grid, p: Vec3): boolean {
+  const [i, k] = cellOf(g, p);
+  return i >= 0 && k >= 0 && i < g.nx && k < g.nz && g.free[key(g, i, k)] === 1;
+}
+
 function nearestFree(g: Grid, i: number, k: number, maxR: number): [number, number] | null {
   for (let r = 0; r <= maxR; r++) {
     let best: [number, number] | null = null;

@@ -2,9 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { RoomPlanObject, RoomPlanWall } from '../../modules/arkit-capture/src/ArkitCapture.types.ts';
 import {
-  approachPoint, AZIMUTHS, blockedByWall, boxCorners, closeDistance, displayName, domeProgress, ENTER_BLACK_S,
-  exportBox, footprintDistance, makeDome, type ModeState, nativeMode, nextSlice, sliceFor, sliceHint, stepMode,
-  wantsOwnScan, type Vec3,
+  aimedAt, approachPoint, AZIMUTHS, blockedByWall, boxCorners, closeDistance, displayName, domeComplete, domeProgress,
+  ENTER_AIM_S, ENTER_BLACK_S, exportBox, footprintDistance, makeDome, type ModeState, nativeMode, nextSlice,
+  PHONE_MAX_M, refreshDome, sliceFor, sliceHint, stepMode, wantsOwnScan, type Vec3,
 } from './objectMode.ts';
 
 const near = (a: number, b: number, eps = 1e-6) => assert.ok(Math.abs(a - b) < eps, `${a} != ${b}`);
@@ -97,15 +97,19 @@ test('approach point stands in front of the piece, toward the phone', () => {
 
 test('mode machine: room -> black -> object -> black -> room', () => {
   let s: ModeState = { kind: 'room' };
-  const base = { pending: [dresser], complete: false, heightDev: 0, enterAllowed: true };
+  const fwd: Vec3 = [-1, -0.3, 0]; // looking toward the dresser (it is at -x from the phone)
+  const base = { pending: [dresser], complete: false, heightDev: 0, fwd };
   s = stepMode(s, { ...base, now: 0, pos: [5, 1.5, 0] });
   assert.equal(s.kind, 'room'); // 2.5 m away
-  s = stepMode(s, { ...base, now: 1, pos: [3.8, 1.5, 0] }); // 1.3 m from the footprint
+  s = stepMode(s, { ...base, now: 1, pos: [3.8, 1.5, 0] }); // 1.3 m from the footprint, pointed at it
+  assert.equal(s.kind, 'room'); // eyeing starts
+  s = stepMode(s, { ...base, now: 1 + ENTER_AIM_S, pos: [3.8, 1.5, 0] });
   assert.equal(s.kind, 'toObject');
   assert.deepEqual(nativeMode(s), { mode: 'paused', objectId: null });
-  s = stepMode(s, { ...base, now: 1 + ENTER_BLACK_S - 0.1, pos: [3.8, 1.5, 0] });
+  const t0 = 1 + ENTER_AIM_S;
+  s = stepMode(s, { ...base, now: t0 + ENTER_BLACK_S - 0.1, pos: [3.8, 1.5, 0] });
   assert.equal(s.kind, 'toObject');
-  s = stepMode(s, { ...base, now: 1 + ENTER_BLACK_S, pos: [3.8, 1.5, 0] });
+  s = stepMode(s, { ...base, now: t0 + ENTER_BLACK_S, pos: [3.8, 1.5, 0] });
   assert.deepEqual(nativeMode(s), { mode: 'object', objectId: 'd1' });
   s = stepMode(s, { ...base, now: 30, pos: [3, 0.8, 0], complete: true });
   assert.equal(s.kind, 'toRoom');
@@ -115,9 +119,76 @@ test('mode machine: room -> black -> object -> black -> room', () => {
   assert.equal(s.kind, 'room');
 });
 
-test('mode machine: nothing pending or entry not allowed stays in room', () => {
-  const s = stepMode({ kind: 'room' }, { now: 0, pos: [2.6, 1.5, 0], pending: [], complete: false, heightDev: 0, enterAllowed: true });
+test('mode machine: close but looking away, or nothing pending, stays in room', () => {
+  const away: Vec3 = [1, 0, 0];
+  let s: ModeState = { kind: 'room' };
+  for (let t = 0; t < 10; t++) s = stepMode(s, { now: t, pos: [2.6, 1.5, 0], fwd: away, pending: [dresser], complete: false, heightDev: 0 });
   assert.equal(s.kind, 'room');
-  const t = stepMode({ kind: 'room' }, { now: 0, pos: [2.6, 1.5, 0], pending: [dresser], complete: false, heightDev: 0, enterAllowed: false });
-  assert.equal(t.kind, 'room');
+  const at: Vec3 = [-1, -1, 0];
+  s = { kind: 'room' };
+  for (let t = 0; t < 10; t++) s = stepMode(s, { now: t, pos: [2.6, 1.5, 0], fwd: at, pending: [], complete: false, heightDev: 0 });
+  assert.equal(s.kind, 'room');
+});
+
+test('mode machine: looking away resets the entry wait', () => {
+  const at: Vec3 = [-1, -0.3, 0];
+  const away: Vec3 = [1, 0, 0];
+  const base = { pos: [3.8, 1.5, 0] as Vec3, pending: [dresser], complete: false, heightDev: 0 };
+  let s: ModeState = stepMode({ kind: 'room' }, { ...base, now: 0, fwd: at });
+  s = stepMode(s, { ...base, now: 0.6, fwd: away });
+  s = stepMode(s, { ...base, now: 0.7, fwd: at });
+  s = stepMode(s, { ...base, now: 1.2, fwd: at });
+  assert.equal(s.kind, 'room'); // only 0.5 s since looking back
+  s = stepMode(s, { ...base, now: 0.7 + ENTER_AIM_S, fwd: at });
+  assert.equal(s.kind, 'toObject');
+});
+
+/** Bed 1.7 x 0.76 x 2.1 m on the floor (y = 0) at the origin, head against a wall at z = -1.1. */
+const bed: RoomPlanObject = { id: 'b1', category: 'bed', center: [0, 0.38, 0], size: [1.7, 0.76, 2.1], yaw_deg: 0 };
+
+test('aim: looking at the bed but not its middle counts (close up)', () => {
+  const cam: Vec3 = [1.6, 1.5, 0.6];
+  const fwd: Vec3 = [0.5 - cam[0], 0.5 - cam[1], 0.9 - cam[2]]; // at the foot corner
+  assert.ok(aimedAt(bed, cam, fwd));
+  assert.ok(!aimedAt(bed, cam, [1, 0, 0])); // away from it
+});
+
+test('dome: spots off the floor map are unreachable and do not count', () => {
+  // Free floor only in front of the foot (z > 1.2) and to the +x side.
+  const free = (p: Vec3) => p[2] > 1.2 || p[0] > 1.0;
+  const dome = makeDome(bed, 1.6, [], { free, floorY: 0 });
+  const reach = dome.filter((s) => s.reachable);
+  assert.ok(reach.length > 0 && reach.length < dome.length);
+  for (const s of reach) assert.ok(free(s.cam));
+  // Every reachable spot is at a height a person can hold.
+  for (const s of reach) assert.ok(s.cam[1] >= 0.4 - 1e-9 && s.cam[1] <= PHONE_MAX_M + 1e-9, `${s.cam[1]}`);
+  reach.forEach((s) => { s.filled = true; });
+  assert.equal(domeProgress(dome), 1);
+  assert.ok(domeComplete(dome));
+  // Unreachable slices are never offered as next.
+  dome.forEach((s) => { s.filled = false; });
+  const i = nextSlice(dome, bed, [0, 1.5, -3]);
+  assert.ok(dome[i].reachable);
+});
+
+test('dome: nothing reachable is 0 %, not complete; the floor map growing brings slices back', () => {
+  const dome = makeDome(bed, 1.6, [], { free: () => false, floorY: 0 });
+  assert.equal(domeProgress(dome), 0);
+  assert.ok(!domeComplete(dome));
+  refreshDome(dome, bed, { free: () => true, floorY: 0 });
+  assert.ok(dome.some((s) => s.reachable));
+});
+
+test('hint: height asked at the phone own distance, not a fixed far spot', () => {
+  const dome = makeDome(bed, 1.6, [], { floorY: 0 });
+  const s = dome.filter((d) => d.ring === 2 && d.reachable)[0];
+  const hSpot = Math.hypot(s.cam[0], s.cam[2]);
+  const h = [s.dir[0], 0, s.dir[2]];
+  const hl = Math.hypot(h[0], h[2]);
+  const at = (y: number): Vec3 => [(h[0] / hl) * hSpot, y, (h[2] / hl) * hSpot];
+  assert.equal(sliceHint(s, at(s.cam[1]), bed), null);
+  assert.equal(sliceHint(s, at(s.cam[1] - 0.3), bed), 'Telefonu kaldır');
+  assert.equal(sliceHint(s, at(s.cam[1] + 0.3), bed), 'Telefonu biraz indir');
+  // Far beyond the spot: walk in first.
+  assert.equal(sliceHint(s, [(h[0] / hl) * (hSpot + 1.5), s.cam[1], (h[2] / hl) * (hSpot + 1.5)], bed), 'Biraz yaklaş');
 });

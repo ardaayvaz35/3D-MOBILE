@@ -418,10 +418,13 @@ export default function LidarScanScreen({ navigation }: Props) {
                       ? 'İyi gidiyor. Mavi ve sarı kalan yerlere 1-3 m uzaktan, başka bir noktadan bak; yaklaşmak sayılmaz.'
                       : 'Ağ renkleri: mavi henüz iyi değil, yeşil tamam, gri LiDAR ölçemiyor (cam, ayna).'}
             </Text>
-            {recording && inObject && om.progress >= FINISH_OFFER ? (
+            {/* Always there: a piece that cannot be filled must never trap the user (test 2026-10-03). */}
+            {recording && inObject ? (
               <View style={styles.actionRow}>
                 <Pressable style={styles.smallButton} onPress={om.finishCurrent}>
-                  <Text style={styles.smallText}>{om.currentName} tamam</Text>
+                  <Text style={styles.smallText}>
+                    {om.progress >= FINISH_OFFER ? `${om.currentName} tamam` : `${om.currentName} taramasını bitir`}
+                  </Text>
                 </Pressable>
               </View>
             ) : null}

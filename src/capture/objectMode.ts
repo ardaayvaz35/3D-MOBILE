@@ -125,12 +125,62 @@ export const WALL_CLEARANCE_M = 0.45;
 export type Slice = {
   /** Unit direction from the piece's centre toward the camera. */
   dir: Vec3;
-  /** Where to stand (phone position) to shoot it. */
+  /** Where to hold the phone to shoot it (on free floor, at a height a person can hold). */
   cam: Vec3;
   ring: number;
   azimuth: number;
   filled: boolean;
+  /**
+   * A person can get there: free floor along this direction and a phone
+   * height between PHONE_MIN_M and PHONE_MAX_M above the floor. Only these
+   * count toward progress (test 2026-10-03: a third of the bed's dome was
+   * behind the headboard wall or across other furniture, so 100% could
+   * never come).
+   */
+  reachable: boolean;
 };
+
+/** Phone heights above the floor a person can shoot from (crouched to arm up). */
+export const PHONE_MIN_M = 0.4;
+export const PHONE_MAX_M = 1.9;
+/** Nearest a person stands to the piece's side. */
+const STAND_GAP_M = 0.3;
+
+/** Optional knowledge of the room for placing camera spots. */
+export type Room = { free?: (p: Vec3) => boolean; floorY?: number | null };
+
+/**
+ * Where to hold the phone for direction (h, el): along the horizontal line
+ * from the centre, between the piece's side and the farthest distance that
+ * still fills the slice, the closest to the ideal close-up distance that is
+ * on free floor at a holdable height. null = nowhere.
+ */
+export function standSpot(o: RoomPlanObject, h: Vec3, el: number, room: Room): Vec3 | null {
+  const ideal = closeDistance(o) * Math.cos(el);
+  const lo = reach(o, h) + STAND_GAP_M;
+  const hi = closeDistance(o) * MAX_DIST_MUL * Math.cos(el);
+  const cands: number[] = ideal >= lo && ideal <= hi ? [ideal] : [];
+  for (let d = lo; d <= hi + 1e-9; d += 0.1) cands.push(d);
+  cands.sort((a, b) => Math.abs(a - ideal) - Math.abs(b - ideal));
+  for (const d of cands) {
+    const p: Vec3 = [o.center[0] + h[0] * d, o.center[1] + d * Math.tan(el), o.center[2] + h[2] * d];
+    if (room.floorY != null && (p[1] < room.floorY + PHONE_MIN_M || p[1] > room.floorY + PHONE_MAX_M)) continue;
+    if (room.free && !room.free(p)) continue;
+    return p;
+  }
+  return null;
+}
+
+/** Re-place unfilled slices as the floor map grows. */
+export function refreshDome(dome: Slice[], o: RoomPlanObject, room: Room): void {
+  for (const s of dome) {
+    if (s.filled) continue;
+    const h = norm([s.dir[0], 0, s.dir[2]]);
+    const spot = standSpot(o, h, Math.asin(s.dir[1]), room);
+    s.reachable = spot !== null;
+    if (spot) s.cam = spot;
+  }
+}
 
 /** Distance at which the piece fills most of a portrait frame. */
 export function closeDistance(o: RoomPlanObject): number {
@@ -154,7 +204,7 @@ export function blockedByWall(o: RoomPlanObject, h: Vec3, walls: RoomPlanWall[])
   return false;
 }
 
-export function makeDome(o: RoomPlanObject, eyeY: number, walls: RoomPlanWall[]): Slice[] {
+export function makeDome(o: RoomPlanObject, eyeY: number, walls: RoomPlanWall[], room: Room = {}): Slice[] {
   const r = closeDistance(o);
   const out: Slice[] = [];
   LEVEL_DISTANCES.forEach((d, ring) => {
@@ -164,22 +214,56 @@ export function makeDome(o: RoomPlanObject, eyeY: number, walls: RoomPlanWall[])
       const h: Vec3 = [Math.sin(az * RAD), 0, -Math.cos(az * RAD)];
       if (blockedByWall(o, h, walls)) continue;
       const dir: Vec3 = [h[0] * Math.cos(el), Math.sin(el), h[2] * Math.cos(el)];
-      out.push({ dir, cam: add(o.center, mul(dir, r)), ring, azimuth: az, filled: false });
+      const spot = standSpot(o, h, el, room);
+      out.push({
+        dir, cam: spot ?? add(o.center, mul(dir, r)), ring, azimuth: az, filled: false, reachable: spot !== null,
+      });
     }
   });
   return out;
 }
 
+/** Farthest a filling frame may be, in close distances. */
+export const MAX_DIST_MUL = 1.35;
+
+/**
+ * Is the camera looking at the piece? Its view axis hits the box (grown
+ * 5 cm), or the centre is within AIM_DEG. A centre-only rule failed on the
+ * bed: close up, a phone looks at part of it, not its middle (test
+ * 2026-10-03: 99 of 166 bed frames rejected).
+ */
+export function aimedAt(o: RoomPlanObject, camPos: Vec3, camFwd: Vec3): boolean {
+  if (angleDeg(camFwd, sub(o.center, camPos)) <= AIM_DEG) return true;
+  const { ax, az } = axes(o);
+  const d = sub(camPos, o.center);
+  const lo = [dot(d, ax), d[1], dot(d, az)];
+  const ld = [dot(camFwd, ax), camFwd[1], dot(camFwd, az)];
+  let t0 = 0;
+  let t1 = Infinity;
+  for (let i = 0; i < 3; i++) {
+    const half = o.size[i] / 2 + 0.05;
+    if (Math.abs(ld[i]) < 1e-9) {
+      if (Math.abs(lo[i]) > half) return false;
+      continue;
+    }
+    const a = (-half - lo[i]) / ld[i];
+    const b = (half - lo[i]) / ld[i];
+    t0 = Math.max(t0, Math.min(a, b));
+    t1 = Math.min(t1, Math.max(a, b));
+  }
+  return t0 <= t1;
+}
+
 /**
  * The slice a kept frame from `camPos` looking along `camFwd` fills, or -1.
- * Spec §3.5: direction within SLICE_DEG, the piece in view (centre within
- * AIM_DEG) and close (no further than 1.35x the close distance).
+ * Spec §3.5: direction within SLICE_DEG, the piece in view (aimedAt) and
+ * close (no further than MAX_DIST_MUL close distances).
  */
 export function sliceFor(dome: Slice[], o: RoomPlanObject, camPos: Vec3, camFwd: Vec3): number {
   const toCam = sub(camPos, o.center);
   const dist = len(toCam);
-  if (dist < 0.3 || dist > closeDistance(o) * 1.35) return -1;
-  if (angleDeg(camFwd, sub(o.center, camPos)) > AIM_DEG) return -1;
+  if (dist < 0.3 || dist > closeDistance(o) * MAX_DIST_MUL) return -1;
+  if (!aimedAt(o, camPos, camFwd)) return -1;
   let best = -1;
   let bestA = SLICE_DEG;
   dome.forEach((s, i) => {
@@ -189,31 +273,46 @@ export function sliceFor(dome: Slice[], o: RoomPlanObject, camPos: Vec3, camFwd:
   return best;
 }
 
-export const domeProgress = (dome: Slice[]) =>
-  dome.length ? dome.filter((s) => s.filled).length / dome.length : 1;
+/** Slices that count: reachable ones, and any the user filled anyway. */
+const counted = (dome: Slice[]) => dome.filter((s) => s.reachable || s.filled);
 
-/** The unfilled slice closest (in direction) to where the phone is now. */
+/** Share of the counted slices filled; 0 when none can be reached (the user ends it). */
+export function domeProgress(dome: Slice[]): number {
+  const c = counted(dome);
+  return c.length ? c.filter((s) => s.filled).length / c.length : 0;
+}
+
+/** Every reachable slice filled (and there was at least one). */
+export const domeComplete = (dome: Slice[]) => counted(dome).length > 0 && domeProgress(dome) >= 1;
+
+/** The unfilled reachable slice closest (in direction) to where the phone is now. */
 export function nextSlice(dome: Slice[], o: RoomPlanObject, camPos: Vec3): number {
   const toCam = sub(camPos, o.center);
   let best = -1;
   let bestA = Infinity;
   dome.forEach((s, i) => {
-    if (s.filled) return;
+    if (s.filled || !s.reachable) return;
     const a = angleDeg(s.dir, toCam);
     if (a < bestA) { bestA = a; best = i; }
   });
   return best;
 }
 
-/** Spoken hint for reaching a slice's camera spot. */
+/**
+ * Hint for reaching a slice. Distance first (the height needed depends on
+ * it), then the height the slice's direction asks for AT THE PHONE'S
+ * CURRENT DISTANCE -- the old fixed spot asked for the phone 2.5 m above
+ * the floor on the bed's top ring (test 2026-10-03).
+ */
 export function sliceHint(s: Slice, camPos: Vec3, o: RoomPlanObject): string | null {
-  const dy = s.cam[1] - camPos[1];
-  if (dy > 0.15) return 'Telefonu kaldır';
-  if (dy < -0.15) return camPos[1] - s.cam[1] > 0.5 ? 'Eğil, telefonu alçalt' : 'Telefonu biraz indir';
-  const want = closeDistance(o);
-  const have = len(sub(camPos, o.center));
-  if (have > want * 1.3) return 'Biraz yaklaş';
-  if (have < want * 0.6) return 'Biraz uzaklaş';
+  const hNow = Math.hypot(camPos[0] - o.center[0], camPos[2] - o.center[2]);
+  const hSpot = Math.hypot(s.cam[0] - o.center[0], s.cam[2] - o.center[2]);
+  if (hNow > hSpot + 0.5) return 'Biraz yaklaş';
+  if (hNow < hSpot - 0.5) return 'Biraz uzaklaş';
+  const el = Math.asin(Math.max(-1, Math.min(1, s.dir[1])));
+  const dy = o.center[1] + hNow * Math.tan(el) - camPos[1];
+  if (dy > 0.12) return 'Telefonu kaldır';
+  if (dy < -0.12) return dy < -0.5 ? 'Eğil, telefonu alçalt' : 'Telefonu biraz indir';
   return null;
 }
 
@@ -228,6 +327,13 @@ export function approachPoint(o: RoomPlanObject, camPos: Vec3): Vec3 {
 
 /** Spec §3.4: the black screen comes when the phone is this close to the piece. */
 export const ENTER_M = 1.5;
+/**
+ * ...and has been pointed at it this long. Entry used to wait for the room
+ * guidance to have nothing left to show; it almost always had a target, so
+ * the dresser never started and the bed started out of nowhere (test
+ * 2026-10-03). Looking at a close piece is the user's own signal.
+ */
+export const ENTER_AIM_S = 1.0;
 /** Spec §3.4: black screen before object mode. */
 export const ENTER_BLACK_S = 2.0;
 /** Spec §3.6: back at the locked height within this, the camera comes back. */
@@ -236,7 +342,8 @@ export const RETURN_BAND_M = 0.05;
 export const RETURN_HINT_AFTER_S = 10;
 
 export type ModeState =
-  | { kind: 'room' }
+  /** `eyeing`: a close pending piece the phone has pointed at since `since`. */
+  | { kind: 'room'; eyeing?: { id: string; since: number } }
   | { kind: 'toObject'; id: string; since: number }
   | { kind: 'object'; id: string }
   | { kind: 'toRoom'; id: string; since: number };
@@ -251,6 +358,17 @@ export function nativeMode(s: ModeState): { mode: NativeMode; objectId: string |
   }
 }
 
+/** The closest pending piece within ENTER_M that the phone points at, or null. */
+export function eyedPiece(pending: RoomPlanObject[], pos: Vec3, fwd: Vec3): RoomPlanObject | null {
+  let best: RoomPlanObject | null = null;
+  let bestD = ENTER_M;
+  for (const o of pending) {
+    const d = footprintDistance(pos, o);
+    if (d <= bestD && aimedAt(o, pos, fwd)) { bestD = d; best = o; }
+  }
+  return best;
+}
+
 /**
  * One tick. `pending` are pieces still to scan; `complete` says the current
  * piece's dome is done (or the user ended it); `heightDev` is the phone's
@@ -258,18 +376,14 @@ export function nativeMode(s: ModeState): { mode: NativeMode; objectId: string |
  */
 export function stepMode(
   s: ModeState,
-  input: { now: number; pos: Vec3; pending: RoomPlanObject[]; complete: boolean; heightDev: number; enterAllowed: boolean },
+  input: { now: number; pos: Vec3; fwd: Vec3; pending: RoomPlanObject[]; complete: boolean; heightDev: number },
 ): ModeState {
   switch (s.kind) {
     case 'room': {
-      if (!input.enterAllowed) return s;
-      let best: RoomPlanObject | null = null;
-      let bestD = ENTER_M;
-      for (const o of input.pending) {
-        const d = footprintDistance(input.pos, o);
-        if (d <= bestD) { bestD = d; best = o; }
-      }
-      return best ? { kind: 'toObject', id: best.id, since: input.now } : s;
+      const o = eyedPiece(input.pending, input.pos, input.fwd);
+      if (!o) return s.eyeing ? { kind: 'room' } : s;
+      if (s.eyeing?.id !== o.id) return { kind: 'room', eyeing: { id: o.id, since: input.now } };
+      return input.now - s.eyeing.since >= ENTER_AIM_S ? { kind: 'toObject', id: o.id, since: input.now } : s;
     }
     case 'toObject':
       return input.now - s.since >= ENTER_BLACK_S ? { kind: 'object', id: s.id } : s;

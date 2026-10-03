@@ -17,7 +17,9 @@ import {
   angleDeg,
   approachPoint,
   AIM_DEG,
+  ENTER_M,
   displayName,
+  domeComplete,
   domeProgress,
   exportBox,
   footprintDistance,
@@ -25,7 +27,9 @@ import {
   type ModeState,
   nativeMode,
   nextSlice,
+  refreshDome,
   RETURN_HINT_AFTER_S,
+  type Room,
   type Slice,
   sliceFor,
   sliceHint,
@@ -33,10 +37,12 @@ import {
   type Vec3,
   wantsOwnScan,
 } from './objectMode';
-import { buildGrid, findPath } from './walkPath';
+import { buildGrid, findPath, type Grid, isFreeAt } from './walkPath';
 
 const ROUTE_EVERY_S = 0.5;
-/** "Finish this piece" is offered from this much of the dome. */
+/** The floor map (and with it which dome slices a person can reach) is rebuilt this often. */
+const GRID_EVERY_S = 2;
+/** From this much of the dome the finish button says "tamam" instead of "bitir". */
 export const FINISH_OFFER = 0.7;
 
 const pos = (T: number[]): Vec3 => [T[12], T[13], T[14]];
@@ -91,6 +97,8 @@ export function useObjectMode(
   const poseRef = useRef<PosePayload | null>(null);
   const route = useRef<Vec3[] | null>(null);
   const lastRoute = useRef(0);
+  const grid = useRef<Grid | null>(null);
+  const lastGrid = useRef(0);
   const sentMode = useRef('');
 
   guideRef.current = guide;
@@ -107,6 +115,8 @@ export function useObjectMode(
     finishAsked.current = false;
     lastFrames.current = 0;
     route.current = null;
+    grid.current = null;
+    lastGrid.current = 0;
     sentMode.current = '';
     setTick((t) => t + 1);
   };
@@ -124,6 +134,11 @@ export function useObjectMode(
 
   const pending = () =>
     [...objects.current.values()].filter((o) => wantsOwnScan(o) && !done.current.has(o.id));
+
+  const room = (): Room => {
+    const g = grid.current;
+    return { free: g ? (p) => isFreeAt(g, p) : undefined, floorY: floor.floorY() };
+  };
 
   const applyNative = () => {
     const n = nativeMode(state.current);
@@ -145,6 +160,17 @@ export function useObjectMode(
       const eyeY = here[1] - heightDev;
       const s0 = state.current;
 
+      // Floor map: where a person can stand, so only reachable slices count.
+      if (now - lastGrid.current >= GRID_EVERY_S) {
+        lastGrid.current = now;
+        grid.current = buildGrid(floor.floorPoints(), floor.walkedPath(), [...objects.current.values()], walls.current);
+        if (s0.kind === 'object') {
+          const o = objects.current.get(s0.id);
+          const d = domes.current.get(s0.id);
+          if (o && d) refreshDome(d, o, room());
+        }
+      }
+
       // Fill the dome from frames actually kept (frame count went up).
       if (s0.kind === 'object') {
         const o = objects.current.get(s0.id);
@@ -158,15 +184,13 @@ export function useObjectMode(
 
       const cur = s0.kind === 'room' ? null : objects.current.get(s0.id) ?? null;
       const dome = cur ? domes.current.get(cur.id) ?? [] : [];
-      const complete = finishAsked.current || (s0.kind === 'object' && dome.length > 0 && domeProgress(dome) >= 1);
-      // Room mode only hands over when nothing is left to turn for here.
-      const enterAllowed = !g || g.mode === 'walk' || g.mode === 'wait' || g.done;
-      const s1 = stepMode(s0, { now, pos: here, pending: pending(), complete, heightDev, enterAllowed });
+      const complete = finishAsked.current || (s0.kind === 'object' && domeComplete(dome));
+      const s1 = stepMode(s0, { now, pos: here, fwd: fwdOf(T), pending: pending(), complete, heightDev });
 
       if (s1 !== s0) {
         if (s1.kind === 'object') {
           const o = objects.current.get(s1.id);
-          if (o && !domes.current.has(o.id)) domes.current.set(o.id, makeDome(o, eyeY, walls.current));
+          if (o && !domes.current.has(o.id)) domes.current.set(o.id, makeDome(o, eyeY, walls.current, room()));
           scanned.current.add(s1.id);
           setObjectBoxes([...scanned.current].map((id) => objects.current.get(id)).filter(Boolean).map((o) => exportBox(o!)));
         }
@@ -233,9 +257,13 @@ export function useObjectMode(
     hint =
       (i >= 0 ? sliceHint(dome[i], here, cur) : null) ??
       (toObj > AIM_DEG ? `${curName}'e çevir` : `${curName}: etrafında yavaşça dolaş`);
-  } else if (s.kind === 'room' && route.current) {
+  } else if (s.kind === 'room' && here && p) {
     const list = pending();
-    if (list.length && here) {
+    const eyed = s.eyeing ? objects.current.get(s.eyeing.id) : null;
+    const close = list.find((o) => footprintDistance(here, o) <= ENTER_M);
+    if (eyed) hint = `${displayName(eyed)} taraması başlıyor…`;
+    else if (close) hint = `${displayName(close)}: taramak için telefonu ona çevir`;
+    else if (list.length && route.current) {
       const o = list.reduce((a, b) => (footprintDistance(here, a) <= footprintDistance(here, b) ? a : b));
       hint = `${displayName(o)} bulundu, yanına git`;
     }
