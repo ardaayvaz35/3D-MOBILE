@@ -100,6 +100,16 @@ export function useObjectMode(
   const grid = useRef<Grid | null>(null);
   const lastGrid = useRef(0);
   const sentMode = useRef('');
+  /**
+   * Room lock height (ARKit y), from guidance payloads: lock = y - heightDeviation.
+   * On the black screens the native side skips the frame path, guidance
+   * included, so heightDeviation froze and the way back to room mode never
+   * opened (device test 2026-10-03). The live pose still arrives; the
+   * deviation there is pose y minus this.
+   */
+  const lockSamples = useRef<number[]>([]);
+  const lockY = useRef<number | null>(null);
+  const lastGuide = useRef<GuidancePayload | null>(null);
 
   guideRef.current = guide;
   framesNow.current = frameCount;
@@ -118,6 +128,9 @@ export function useObjectMode(
     grid.current = null;
     lastGrid.current = 0;
     sentMode.current = '';
+    lockSamples.current = [];
+    lockY.current = null;
+    lastGuide.current = null;
     setTick((t) => t + 1);
   };
 
@@ -156,7 +169,15 @@ export function useObjectMode(
       const T = p.transform;
       const here = pos(T);
       const g = guideRef.current;
-      const heightDev = g?.heightDeviation ?? 0;
+      // A fresh guidance payload paired with the newest pose: one lock sample.
+      if (g && g !== lastGuide.current) {
+        lastGuide.current = g;
+        const k = lockSamples.current;
+        k.push(here[1] - g.heightDeviation);
+        if (k.length > 40) k.shift();
+        lockY.current = [...k].sort((a, b) => a - b)[k.length >> 1];
+      }
+      const heightDev = lockY.current !== null ? here[1] - lockY.current : g?.heightDeviation ?? 0;
       const eyeY = here[1] - heightDev;
       const s0 = state.current;
 
@@ -246,7 +267,7 @@ export function useObjectMode(
   const cur = s.kind === 'room' ? null : objects.current.get(s.id) ?? null;
   const curName = cur ? displayName(cur) : '';
   const dome = cur ? domes.current.get(cur.id) ?? [] : [];
-  const heightDev = guide?.heightDeviation ?? 0;
+  const heightDev = here && lockY.current !== null ? here[1] - lockY.current : guide?.heightDeviation ?? 0;
 
   let hint: string | null = null;
   let aim: Vec3 | null = null;
