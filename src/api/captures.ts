@@ -202,16 +202,16 @@ async function readErrorBody(ctx: unknown): Promise<Record<string, unknown> | nu
   }
 }
 
-export async function uploadCapture(
-  archive: LocalArchive,
-  clientType: ClientType
+/// Hands an archive already in storage to the server: row, credits, GPU.
+/// `house` carries the house-session fields (spec 2026-10-05 §4.4).
+export async function submitCapture(
+  storagePath: string,
+  clientType: ClientType,
+  house?: Record<string, unknown>
 ): Promise<UploadResponse> {
-  const storagePath = (await putArchive(archive)).storagePath;
-  console.log('[upload] file uploaded, invoking submit-capture...');
-
   // Hand off to the Edge Function (credits + GPU trigger).
   const { data, error } = await supabase.functions.invoke('submit-capture', {
-    body: { client_type: clientType, storage_path: storagePath },
+    body: { client_type: clientType, storage_path: storagePath, ...(house ?? {}) },
   });
   if (error) {
     // supabase-js puts the raw Response in `context`; its JSON body carries
@@ -227,11 +227,24 @@ export async function uploadCapture(
     }
     const detail = body?.error ?? error.message;
     console.log('[upload] submit-capture FAILED', detail, error);
-    throw new Error(`İşleme başlatılamadı: ${detail}`);
+    throw new Error(String(detail));
   }
   console.log('[upload] submit-capture OK, capture_id:', data?.capture_id);
 
   return { capture_id: data.capture_id, status: data.status ?? 'uploaded', message: 'Yüklendi' };
+}
+
+export async function uploadCapture(
+  archive: LocalArchive,
+  clientType: ClientType
+): Promise<UploadResponse> {
+  const storagePath = (await putArchive(archive)).storagePath;
+  console.log('[upload] file uploaded, invoking submit-capture...');
+  try {
+    return await submitCapture(storagePath, clientType);
+  } catch (e: any) {
+    throw new Error(`İşleme başlatılamadı: ${e?.message ?? String(e)}`);
+  }
 }
 
 /// Window pass photos (see WindowScanScreen): stored for the server to pick
