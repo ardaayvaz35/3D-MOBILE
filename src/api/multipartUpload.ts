@@ -7,7 +7,7 @@
 import * as FileSystem from 'expo-file-system/legacy';
 import { supabase } from '../lib/supabase';
 import type { MultipartState } from '../house/houseSession';
-import { doneParts, missingParts, partRange, readEtag } from './multipartPlan';
+import { doneParts, isStale, missingParts, partRange, readEtag } from './multipartPlan';
 
 const SIGN_BATCH = 20;
 
@@ -29,33 +29,56 @@ async function call<T>(body: Record<string, unknown>): Promise<T> {
 export async function uploadMultipart(
   fileUri: string,
   prev: MultipartState | undefined,
-  onProgress: (s: MultipartState) => Promise<void>
+  onProgress: (s: MultipartState) => Promise<void>,
+  reinitUsed = false
 ): Promise<MultipartState> {
   const info = await FileSystem.getInfoAsync(fileUri);
   if (!info.exists) throw new Error('Tarama dosyası telefonda bulunamadı');
   const size = (info as any).size as number;
 
-  let state: MultipartState;
-  if (prev && prev.size === size) {
-    state = prev;
-  } else {
+  const initState = async (): Promise<MultipartState> => {
     const init = await call<{ storage_path: string; upload_id: string; part_size: number; part_count: number }>({
       action: 'init', ext: '.zip', size,
     });
-    state = {
+    const fresh: MultipartState = {
       storagePath: init.storage_path, uploadId: init.upload_id,
-      partSize: init.part_size, partCount: init.part_count, size, etags: {},
+      partSize: init.part_size, partCount: init.part_count, size, etags: {}, startedAt: Date.now(),
     };
-    await onProgress(state);
-  }
+    await onProgress(fresh);
+    return fresh;
+  };
+
+  let state: MultipartState =
+    prev && prev.size === size && !isStale(prev, Date.now()) ? prev : await initState();
 
   const partFile = `${FileSystem.cacheDirectory}mp-part.bin`;
+  // R2 answers NoSuchUpload for an aborted upload: start over once, from part 1.
+  let reinitDone = reinitUsed;
+  const gone = (e: unknown) => e instanceof Error && e.message.includes('NoSuchUpload');
+  const withReinit = async <T,>(fn: () => Promise<T>): Promise<T | undefined> => {
+    try {
+      return await fn();
+    } catch (e) {
+      if (!gone(e) || reinitDone) throw e;
+      reinitDone = true;
+      state = await initState();
+      return undefined;
+    }
+  };
+
   let todo = missingParts(state);
   while (todo.length > 0) {
     const batch = todo.slice(0, SIGN_BATCH);
-    const { urls } = await call<{ urls: Record<string, string> }>({
-      action: 'sign', storage_path: state.storagePath, upload_id: state.uploadId, part_numbers: batch,
-    });
+    const signed = await withReinit(() =>
+      call<{ urls: Record<string, string> }>({
+        action: 'sign', storage_path: state.storagePath, upload_id: state.uploadId, part_numbers: batch,
+      })
+    );
+    if (!signed) {
+      todo = missingParts(state);
+      continue;
+    }
+    const { urls } = signed;
     for (const n of batch) {
       const { position, length } = partRange(state, n);
       const b64 = await FileSystem.readAsStringAsync(fileUri, {
@@ -77,9 +100,16 @@ export async function uploadMultipart(
   }
   await FileSystem.deleteAsync(partFile, { idempotent: true });
 
-  await call({
+  const completeBody = () => ({
     action: 'complete', storage_path: state.storagePath, upload_id: state.uploadId,
     part_count: state.partCount, parts: doneParts(state),
   });
+  try {
+    await call(completeBody());
+  } catch (e) {
+    if (!gone(e) || reinitDone) throw e;
+    // Aborted before complete: a re-init needs every part again; restart the whole upload once.
+    return uploadMultipart(fileUri, undefined, onProgress, true);
+  }
   return state;
 }

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { doneParts, missingParts, partRange, readEtag } from './multipartPlan.ts';
+import { doneParts, isStale, missingParts, partRange, readEtag } from './multipartPlan.ts';
 import type { MultipartState } from '../house/houseSession.ts';
 
 const S = (etags: Record<number, string> = {}): MultipartState => ({
@@ -31,4 +31,12 @@ test('done parts for complete', () => {
   assert.deepEqual(doneParts(S({ 2: 'b', 1: 'a' })), [
     { part_number: 1, etag: 'a' }, { part_number: 2, etag: 'b' },
   ]);
+});
+
+test('isStale: fresh, 7 days old, missing startedAt', () => {
+  const now = 10 * 24 * 3600 * 1000;
+  const day = 24 * 3600 * 1000;
+  assert.equal(isStale({ ...S(), startedAt: now - day }, now), false);
+  assert.equal(isStale({ ...S(), startedAt: now - 7 * day }, now), true);
+  assert.equal(isStale(S(), now), true);
 });

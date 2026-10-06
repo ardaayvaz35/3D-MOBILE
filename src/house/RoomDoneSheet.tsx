@@ -18,7 +18,7 @@ export default function RoomDoneSheet({ segmentCount, uploadLine, newMapNext, on
       {uploadLine ? <Text style={styles.line}>{uploadLine}</Text> : null}
       <Text style={styles.line}>
         {newMapNext
-          ? 'Yeni kata geçtin: devam edince önce merdivenin bu ucuna birkaç saniye bak.'
+          ? 'Yeni haritaya geçiliyor. Devam edince önce az önce taradığın yerin en az yarısını yavaşça yeniden tara, sonra yeni bölüme geç.'
           : 'Devam edince önce az önce taradığın yere bak, sonra yeni bölüme dön.'}
       </Text>
       {onRetry ? (

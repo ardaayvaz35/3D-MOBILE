@@ -24,3 +24,8 @@ export function doneParts(s: MultipartState): { part_number: number; etag: strin
     .sort((a, b) => a - b)
     .map((n) => ({ part_number: n, etag: s.etags[n] }));
 }
+
+/// R2 aborts unfinished multipart uploads after 7 days; stop trusting a saved one a day earlier.
+export function isStale(s: MultipartState, now: number, maxAgeMs: number = 6 * 24 * 3600 * 1000): boolean {
+  return s.startedAt == null || now - s.startedAt > maxAgeMs;
+}

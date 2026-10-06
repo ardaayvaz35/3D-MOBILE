@@ -17,6 +17,8 @@ export type MultipartState = {
   partCount: number;
   size: number;
   etags: Record<number, string>;
+  /** ms epoch of init; missing in states saved by older builds (treated as stale). */
+  startedAt?: number;
 };
 
 export type UploadState = 'pending' | 'uploading' | 'uploaded' | 'failed';
