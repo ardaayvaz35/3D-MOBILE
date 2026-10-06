@@ -247,11 +247,17 @@ class CaptureManager {
 
     /// Clears lock state and cancels delayed blocks. Hops to the main thread,
     /// where every other reader and writer of this state lives.
-    private func resetExposureLock(wait: Bool = true) {
+    private func resetExposureLock(arm: Bool, wait: Bool) {
         let reset = {
             self.exposureEpoch += 1
             self.exposureLocked = false
             self.exposureLockTried = false
+            // Set with the reset at start, cleared at stop: always on main.
+            if arm {
+                ArkitSessionHost.shared.onRerun = { [weak self] in self?.exposureMayHaveReset() }
+            } else {
+                ArkitSessionHost.shared.onRerun = nil
+            }
         }
         if Thread.isMainThread { reset() }
         else if wait { DispatchQueue.main.sync(execute: reset) }
@@ -263,19 +269,25 @@ class CaptureManager {
     /// the lock is re-applied while one is meant to be held.
     private func exposureMayHaveReset() {
         guard isRecording, exposureLockTried, captureMode != "room", vista == nil else { return }
+        // Until the lock is back, frames are neither kept nor tagged as locked.
+        // (The re-lock freezes the current auto values; re-applying the first
+        // lock's exact values would need custom-exposure calls in the host.)
+        exposureLocked = false
+        framesPaused = true
         let epoch = exposureEpoch
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             guard let self = self, self.isRecording, self.exposureEpoch == epoch,
                   self.exposureLockTried, self.captureMode != "room", self.vista == nil else { return }
             self.exposureLocked = ArkitSessionHost.shared.lockExposureAndWhiteBalance()
+            self.framesPaused = false
         }
     }
 
     /// Main thread. Waits for auto exposure to settle, then freezes it, so the
     /// lock never grabs a frame full of one wall colour.
     private func beginExposureLock() {
-        exposureEpoch += 1
         guard !exposureLockTried else { return }  // already locked (paused -> object)
+        exposureEpoch += 1
         let epoch = exposureEpoch
         // Frames wait for the lock so every object frame is locked. Whoever
         // bumps the epoch (end of lock, vista, stop) owns clearing this pause.
@@ -378,8 +390,7 @@ class CaptureManager {
         controlCount = 0
         framesPaused = false
         // Async: this runs on the JS thread; blocking on main could deadlock.
-        resetExposureLock(wait: false)
-        ArkitSessionHost.shared.onRerun = { [weak self] in self?.exposureMayHaveReset() }
+        resetExposureLock(arm: true, wait: false)
         currentSegment = 0
         openingsHint = nil
         ArkitSessionHost.shared.coverage.reset()
@@ -412,8 +423,7 @@ class CaptureManager {
         let replaced = replacedSharper
         let inBandCount = framesInBand
         stateLock.unlock()
-        resetExposureLock()
-        ArkitSessionHost.shared.onRerun = nil
+        resetExposureLock(arm: false, wait: true)
         ArkitSessionHost.shared.unlockExposureAndWhiteBalance()
         ArkitSessionHost.shared.coverageActive = false
         let finderFacts: [String: Any]
@@ -641,7 +651,7 @@ class CaptureManager {
             }
             self.exposureEpoch += 1
             let epoch = self.exposureEpoch
-            DispatchQueue.main.asyncAfter(deadline: .now() + Self.autoSettleSeconds) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + CaptureManager.autoSettleSeconds) {
                 guard self.exposureEpoch == epoch, self.vista == nil else { return }
                 self.framesPaused = false
             }
