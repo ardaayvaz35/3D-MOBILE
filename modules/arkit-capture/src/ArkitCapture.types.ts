@@ -3,6 +3,7 @@ export type ArkitCaptureModuleEvents = {
   onGuidance: (payload: GuidancePayload) => void;
   onPose: (payload: PosePayload) => void;
   onObjects: (payload: ObjectsPayload) => void;
+  onTrackingStateChanged: (payload: TrackingStatePayload) => void;
 };
 
 export type FrameCapturedPayload = {
@@ -139,4 +140,15 @@ export type VistaShotResult = {
   shotCount: number;
   /** All three exposures had normal tracking; if not, ask for the target again. */
   trackingNormal: boolean;
+};
+
+/** ARKit tracking state (spec 2026-10-05 §4.2). reason '' = none. */
+export type TrackingStatePayload = {
+  state: 'normal' | 'limited' | 'notAvailable';
+  reason: string;
+};
+
+export type WorldMapSaveResult = {
+  bytes: number;
+  mappingStatus: 'notAvailable' | 'limited' | 'extending' | 'mapped' | 'unknown';
 };

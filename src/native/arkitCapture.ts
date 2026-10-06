@@ -5,10 +5,12 @@ import type {
   GuidancePayload,
   ObjectsPayload,
   PosePayload,
+  TrackingStatePayload,
   VideoFormat,
   VistaShotResult,
   WindowScanResult,
   WindowShotResult,
+  WorldMapSaveResult,
 } from '../../modules/arkit-capture/src/ArkitCapture.types';
 
 type NativeModuleShape = {
@@ -31,6 +33,15 @@ type NativeModuleShape = {
   endVista(openingIds: string[]): Promise<number>;
   setCaptureMode(mode: string, objectId: string | null): void;
   setObjectBoxes(json: string): void;
+  saveWorldMap(path: string): Promise<WorldMapSaveResult>;
+  resumeFromWorldMap(path: string): Promise<{ anchors: number }>;
+  startNewMap(): void;
+  currentTrackingState(): TrackingStatePayload;
+  setHouseInfo(json: string): void;
+  addListener(
+    eventName: 'onTrackingStateChanged',
+    listener: (payload: TrackingStatePayload) => void
+  ): { remove: () => void };
   addListener(eventName: 'onObjects', listener: (payload: ObjectsPayload) => void): { remove: () => void };
   addListener(eventName: 'onPose', listener: (payload: PosePayload) => void): { remove: () => void };
   addListener(
@@ -206,6 +217,37 @@ export function onObjects(listener: (payload: ObjectsPayload) => void): () => vo
   if (!nativeModule) return () => {};
   const subscription = nativeModule.addListener('onObjects', listener);
   return () => subscription.remove();
+}
+
+/** House session (spec 2026-10-05 §4.2): the current ARKit map to a file. */
+export function saveWorldMap(path: string): Promise<WorldMapSaveResult> {
+  return requireModule().saveWorldMap(path);
+}
+
+/** Re-runs the session on a saved map; tracking goes limited/relocalizing until found. */
+export function resumeFromWorldMap(path: string): Promise<{ anchors: number }> {
+  return requireModule().resumeFromWorldMap(path);
+}
+
+/** Fresh coordinate frame (relocalization gave up, or a new floor). */
+export function startNewMap(): void {
+  requireModule().startNewMap();
+}
+
+export function currentTrackingState(): TrackingStatePayload {
+  if (!nativeModule) return { state: 'notAvailable', reason: '' };
+  return nativeModule.currentTrackingState();
+}
+
+export function onTrackingStateChanged(listener: (payload: TrackingStatePayload) => void): () => void {
+  if (!nativeModule) return () => {};
+  const subscription = nativeModule.addListener('onTrackingStateChanged', listener);
+  return () => subscription.remove();
+}
+
+/** metadata.json `house` block of the recording in progress. */
+export function setHouseInfo(info: object): void {
+  nativeModule?.setHouseInfo(JSON.stringify(info));
 }
 
 export const ArkitPreviewView = PreviewViewComponent;
