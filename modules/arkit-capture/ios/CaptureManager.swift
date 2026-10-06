@@ -228,6 +228,8 @@ class CaptureManager {
     private var exposureLocked = false
     private var exposureLockTried = false
     private var exposureEpoch = 0
+    /// CACurrentMediaTime of the last return to auto metering (lock or vista).
+    private var lastMeteringAt: CFTimeInterval = 0
     /// Boxes the user scanned, ARKit world, as objects.json wants them.
     private var objectBoxes: [[String: Any]] = []
     private var finder: ObjectFinder?
@@ -245,13 +247,28 @@ class CaptureManager {
 
     /// Clears lock state and cancels delayed blocks. Hops to the main thread,
     /// where every other reader and writer of this state lives.
-    private func resetExposureLock() {
+    private func resetExposureLock(wait: Bool = true) {
         let reset = {
             self.exposureEpoch += 1
             self.exposureLocked = false
             self.exposureLockTried = false
         }
-        if Thread.isMainThread { reset() } else { DispatchQueue.main.sync(execute: reset) }
+        if Thread.isMainThread { reset() }
+        else if wait { DispatchQueue.main.sync(execute: reset) }
+        else { DispatchQueue.main.async(execute: reset) }
+    }
+
+    /// ARKit re-ran its configuration mid-recording (RoomPlan gave the session
+    /// back). Whether that drops the camera's locked exposure is not known, so
+    /// the lock is re-applied while one is meant to be held.
+    private func exposureMayHaveReset() {
+        guard isRecording, exposureLockTried, captureMode != "room", vista == nil else { return }
+        let epoch = exposureEpoch
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self = self, self.isRecording, self.exposureEpoch == epoch,
+                  self.exposureLockTried, self.captureMode != "room", self.vista == nil else { return }
+            self.exposureLocked = ArkitSessionHost.shared.lockExposureAndWhiteBalance()
+        }
     }
 
     /// Main thread. Waits for auto exposure to settle, then freezes it, so the
@@ -263,7 +280,11 @@ class CaptureManager {
         // Frames wait for the lock so every object frame is locked. Whoever
         // bumps the epoch (end of lock, vista, stop) owns clearing this pause.
         framesPaused = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+        // At least 0.5 s, and never before auto has had its settle time since
+        // the last return to auto metering.
+        let sinceMetering = CACurrentMediaTime() - lastMeteringAt
+        let delay = max(0.5, Self.autoSettleSeconds - sinceMetering)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self = self, self.isRecording, self.exposureEpoch == epoch,
                   self.captureMode == "object", self.vista == nil else { return }
             self.exposureLockTried = true
@@ -281,6 +302,7 @@ class CaptureManager {
             exposureLockTried = false
             exposureLocked = false
             ArkitSessionHost.shared.beginMetering()
+            lastMeteringAt = CACurrentMediaTime()
         }
         // Also when the lock never happened: a pending lock block paused frames.
         framesPaused = true
@@ -355,7 +377,9 @@ class CaptureManager {
         vistaCount = 0
         controlCount = 0
         framesPaused = false
-        resetExposureLock()
+        // Async: this runs on the JS thread; blocking on main could deadlock.
+        resetExposureLock(wait: false)
+        ArkitSessionHost.shared.onRerun = { [weak self] in self?.exposureMayHaveReset() }
         currentSegment = 0
         openingsHint = nil
         ArkitSessionHost.shared.coverage.reset()
@@ -389,6 +413,7 @@ class CaptureManager {
         let inBandCount = framesInBand
         stateLock.unlock()
         resetExposureLock()
+        ArkitSessionHost.shared.onRerun = nil
         ArkitSessionHost.shared.unlockExposureAndWhiteBalance()
         ArkitSessionHost.shared.coverageActive = false
         let finderFacts: [String: Any]
@@ -563,13 +588,18 @@ class CaptureManager {
             vistaCount += 1
             id = "v\(vistaCount)"
         }
-        framesPaused = true
         // The vista brackets take the camera off our lock: stop tagging frames
         // as locked and cancel a pending lock (endVista re-arms it).
-        exposureEpoch += 1
-        exposureLocked = false
-        exposureLockTried = false
-        ArkitSessionHost.shared.beginMetering()
+        // Sync Function on the JS thread: state that main-thread blocks and
+        // frame handling read changes on main (the id and `vista` below stay
+        // synchronous, JS needs the id now).
+        DispatchQueue.main.async {
+            self.framesPaused = true
+            self.exposureEpoch += 1
+            self.exposureLocked = false
+            self.exposureLockTried = false
+            ArkitSessionHost.shared.beginMetering()
+        }
         let dir = tempDir.appendingPathComponent("vistas").appendingPathComponent(id)
         vista = WindowShotSession(into: dir, vistaId: id, role: role)
         vistaInfo = ["id": id, "role": role, "path": "vistas/\(id)/shots.json", "segment": currentSegment]
@@ -601,9 +631,20 @@ class CaptureManager {
         info["opening_ids"] = openingIds
         if groups > 0 { vistas.append(info) }
         ArkitSessionHost.shared.beginMetering()
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.autoSettleSeconds) { self.framesPaused = false }
         DispatchQueue.main.async {
-            if self.isRecording && self.captureMode == "object" { self.beginExposureLock() }
+            guard self.isRecording else { return }
+            self.lastMeteringAt = CACurrentMediaTime()
+            if self.captureMode == "object" {
+                // The lock block owns clearing the pause (and its delay covers settling).
+                self.beginExposureLock()
+                return
+            }
+            self.exposureEpoch += 1
+            let epoch = self.exposureEpoch
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.autoSettleSeconds) {
+                guard self.exposureEpoch == epoch, self.vista == nil else { return }
+                self.framesPaused = false
+            }
         }
         return groups
     }

@@ -112,11 +112,19 @@ final class ArkitSessionHost: NSObject, ARSessionDelegate {
         if Thread.isMainThread { apply() } else { DispatchQueue.main.sync(execute: apply) }
     }
 
+    /// Called on main after `rerunConfiguration` re-ran the session.
+    var onRerun: (() -> Void)?
+
     /// Re-applies our LiDAR configuration without reset options, so tracking
     /// and the world origin carry on (used when RoomPlan is switched off; see
     /// ObjectFinder).
     func rerunConfiguration() {
-        let apply = { if self.isRunning { self.session.run(self.makeConfiguration()) } }
+        let apply = {
+            if self.isRunning {
+                self.session.run(self.makeConfiguration())
+                self.onRerun?()
+            }
+        }
         if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
     }
 
