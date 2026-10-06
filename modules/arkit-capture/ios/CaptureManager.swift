@@ -1037,7 +1037,11 @@ class CaptureManager {
             let row = baseAddr.advanced(by: y * bytesPerRow / MemoryLayout<Float32>.stride)
             for x in 0..<width {
                 let depthMeters = row[x]
-                let depthMM = UInt16(min(depthMeters * 1000, Float(UInt16.max)))
+                // Round, not truncate (truncation biased every depth 0.5 mm short).
+                // A non-finite or negative reading would trap UInt16(); 0 = no depth.
+                let mm = depthMeters * 1000
+                let depthMM: UInt16 = (mm.isFinite && mm > 0)
+                    ? UInt16(min(mm.rounded(), Float(UInt16.max))) : 0
                 pixels.append(depthMM)
             }
         }
