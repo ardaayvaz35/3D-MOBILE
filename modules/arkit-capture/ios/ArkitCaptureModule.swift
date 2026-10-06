@@ -10,6 +10,68 @@ public class ArkitCaptureModule: Module {
 
     Events("onFrameCaptured", "onTrackingStateChanged", "onGuidance", "onPose", "onObjects")
 
+    // The event was declared but never sent (spec 2026-10-05 §4.2): the house
+    // resume screen waits for relocalizing -> normal.
+    OnCreate {
+      ArkitSessionHost.shared.onTrackingStateChange = { [weak self] state in
+        self?.sendEvent("onTrackingStateChanged", ArkitSessionHost.trackingPayload(state))
+      }
+    }
+
+    Function("currentTrackingState") { () -> [String: Any] in
+      guard let cam = ArkitSessionHost.shared.session.currentFrame?.camera else {
+        return ["state": "notAvailable", "reason": ""]
+      }
+      return ArkitSessionHost.trackingPayload(cam.trackingState)
+    }
+
+    AsyncFunction("saveWorldMap") { (path: String, promise: Promise) in
+      let status = ArkitSessionHost.shared.session.currentFrame.map {
+        ArkitSessionHost.mappingStatusName($0.worldMappingStatus)
+      } ?? "notAvailable"
+      ArkitSessionHost.shared.session.getCurrentWorldMap { map, error in
+        guard let map = map else {
+          promise.reject("NO_WORLD_MAP", error?.localizedDescription ?? "World map unavailable")
+          return
+        }
+        do {
+          let data = try NSKeyedArchiver.archivedData(withRootObject: map, requiringSecureCoding: true)
+          let url = ArkitCaptureModule.fileURL(path)
+          try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+          // Readable after first unlock, so a resume or background upload never finds it locked (spec §8.2).
+          try data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+          promise.resolve(["bytes": data.count, "mappingStatus": status])
+        } catch {
+          promise.reject("WORLD_MAP_WRITE", error.localizedDescription)
+        }
+      }
+    }
+
+    AsyncFunction("resumeFromWorldMap") { (path: String, promise: Promise) in
+      do {
+        let data = try Data(contentsOf: ArkitCaptureModule.fileURL(path))
+        guard let map = try NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data) else {
+          promise.reject("WORLD_MAP_READ", "Not a world map")
+          return
+        }
+        ArkitSessionHost.shared.runWithWorldMap(map)
+        promise.resolve(["anchors": map.anchors.count])
+      } catch {
+        promise.reject("WORLD_MAP_READ", error.localizedDescription)
+      }
+    }
+
+    Function("startNewMap") { () -> Void in
+      ArkitSessionHost.shared.runFreshMap()
+    }
+
+    Function("setHouseInfo") { (json: String) -> Void in
+      guard let data = json.data(using: .utf8),
+            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+      self.captureManager?.setHouseInfo(obj)
+    }
+
     Function("isLidarSupported") { () -> Bool in
       ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
         && ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
@@ -183,5 +245,11 @@ public class ArkitCaptureModule: Module {
     // shared ARSession (see ArkitSessionHost); CaptureManager attaches to it
     // as a frame sink when recording starts.
     View(ArkitPreviewView.self) { }
+  }
+
+  /// JS passes either a file:// URI (expo-file-system) or a plain path.
+  static func fileURL(_ path: String) -> URL {
+    if path.hasPrefix("file://"), let u = URL(string: path) { return u }
+    return URL(fileURLWithPath: path)
   }
 }

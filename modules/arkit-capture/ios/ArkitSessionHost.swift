@@ -115,6 +115,59 @@ final class ArkitSessionHost: NSObject, ARSessionDelegate {
     /// Re-applies our LiDAR configuration without reset options, so tracking
     /// and the world origin carry on (used when RoomPlan is switched off; see
     /// ObjectFinder).
+    /// Resume a house (spec 2026-10-05 §4.2): our usual configuration plus the
+    /// saved map. resetTracking + removeExistingAnchors as Apple requires for
+    /// relocalization; tracking reports .limited(.relocalizing) until the map
+    /// is recognised, then .normal in the saved map's coordinates.
+    func runWithWorldMap(_ map: ARWorldMap) {
+        let apply = {
+            let config = self.makeConfiguration()
+            config.initialWorldMap = map
+            self.session.run(config, options: [.resetTracking, .removeExistingAnchors])
+            self.isRunning = true
+        }
+        if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
+    }
+
+    /// A fresh coordinate frame (relocalization gave up, or a new floor): the
+    /// server links it to the earlier segments by their overlap.
+    func runFreshMap() {
+        let apply = {
+            self.session.run(self.makeConfiguration(), options: [.resetTracking, .removeExistingAnchors])
+            self.isRunning = true
+        }
+        if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
+    }
+
+    static func trackingPayload(_ s: ARCamera.TrackingState) -> [String: Any] {
+        switch s {
+        case .normal:
+            return ["state": "normal", "reason": ""]
+        case .notAvailable:
+            return ["state": "notAvailable", "reason": ""]
+        case .limited(let r):
+            let reason: String
+            switch r {
+            case .initializing: reason = "initializing"
+            case .relocalizing: reason = "relocalizing"
+            case .excessiveMotion: reason = "excessiveMotion"
+            case .insufficientFeatures: reason = "insufficientFeatures"
+            @unknown default: reason = "unknown"
+            }
+            return ["state": "limited", "reason": reason]
+        }
+    }
+
+    static func mappingStatusName(_ s: ARFrame.WorldMappingStatus) -> String {
+        switch s {
+        case .notAvailable: return "notAvailable"
+        case .limited: return "limited"
+        case .extending: return "extending"
+        case .mapped: return "mapped"
+        @unknown default: return "unknown"
+        }
+    }
+
     func rerunConfiguration() {
         let apply = { if self.isRunning { self.session.run(self.makeConfiguration()) } }
         if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }

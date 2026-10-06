@@ -219,6 +219,8 @@ class CaptureManager {
     private var objectId: String?
     /// Boxes the user scanned, ARKit world, as objects.json wants them.
     private var objectBoxes: [[String: Any]] = []
+    /// metadata.json `house` block (spec 2026-10-05 §4.2), set by JS while recording.
+    private var houseInfo: [String: Any]?
     private var finder: ObjectFinder?
     private let onObjects: ([String: Any]) -> Void
 
@@ -240,6 +242,11 @@ class CaptureManager {
             self.objectId = mode == "object" ? objectId : nil
             self.guidance?.heightFree = mode != "room"
         }
+        if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
+    }
+
+    func setHouseInfo(_ info: [String: Any]) {
+        let apply = { self.houseInfo = info }
         if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
     }
 
@@ -300,6 +307,7 @@ class CaptureManager {
         captureMode = "room"
         objectId = nil
         objectBoxes = []
+        houseInfo = nil
         let finder = ObjectFinder(emit: onObjects)
         self.finder = finder
         DispatchQueue.main.async { finder.start() }
@@ -326,9 +334,11 @@ class CaptureManager {
         ArkitSessionHost.shared.unlockExposureAndWhiteBalance()
         ArkitSessionHost.shared.coverageActive = false
         let finderFacts: [String: Any]
+        var roomJSON: Data? = nil
         if let f = finder {
             if Thread.isMainThread { f.stop() } else { DispatchQueue.main.sync { f.stop() } }
             finderFacts = f.facts
+            roomJSON = f.roomJSON
         } else {
             finderFacts = ["status": "off"]
         }
@@ -404,6 +414,8 @@ class CaptureManager {
             ]
         }
 
+        // Written on the main thread by setHouseInfo; read there too.
+        let house: [String: Any]? = Thread.isMainThread ? houseInfo : DispatchQueue.main.sync { self.houseInfo }
         let exporter = FrameExporter()
         try exporter.export(frames: savedFrames, meshVertices: meshVertices,
                             captureDir: tempDir, to: exportURL,
@@ -415,7 +427,9 @@ class CaptureManager {
                             faceClasses: [
                                 String(ARMeshClassification.window.rawValue): "window",
                                 String(ARMeshClassification.door.rawValue): "door",
-                            ])
+                            ],
+                            house: house,
+                            roomPlanJSON: roomJSON)
 
         return ExportResult(
             archivePath: exportURL.path,

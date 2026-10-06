@@ -40,6 +40,9 @@ final class ObjectFinder: NSObject {
     private var session: AnyObject?
     /// The LiDAR mesh was still there while RoomPlan ran (scene reconstruction on).
     private var meshSeen = false
+    /// The last CapturedRoom as JSON (Codable), written into the archive as
+    /// roomplan.json: this segment's walls/doors/objects before any merge (spec §8.2).
+    private(set) var roomJSON: Data?
 
     init(emit: @escaping ([String: Any]) -> Void) {
         self.emit = emit
@@ -132,6 +135,7 @@ final class ObjectFinder: NSObject {
         let now = CACurrentMediaTime()
         guard now - lastEmit >= Self.emitInterval else { return }
         lastEmit = now
+        roomJSON = try? JSONEncoder().encode(room)
         let mesh = ArkitSessionHost.shared.currentMeshAnchors()
         // RoomPlan's own configuration may switch scene reconstruction off;
         // with no mesh at all the check cannot run, and that is recorded.

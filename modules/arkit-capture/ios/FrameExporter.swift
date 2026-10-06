@@ -23,7 +23,9 @@ class FrameExporter {
                 openingsHint: [String: Any]? = nil,
                 objects: [String: Any]? = nil,
                 openingFaces: [[Float]] = [],
-                faceClasses: [String: String] = [:]) throws {
+                faceClasses: [String: String] = [:],
+                house: [String: Any]? = nil,
+                roomPlanJSON: Data? = nil) throws {
         let workDir = captureDir
         try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
 
@@ -100,6 +102,8 @@ class FrameExporter {
 
         var summary: [String: Any] = [
                 "device_model": deviceModel(),
+                // iOS 26.4-26.6 has a LiDAR drift bug (spec 2026-10-05 §8.2): every scan says which iOS took it.
+                "ios_version": FrameExporter.iosVersion(),
                 "has_lidar": true,
                 // frameMetas, not frames: a frame whose JPEG is missing from
                 // disk is skipped above, and claiming it here would point the
@@ -137,6 +141,11 @@ class FrameExporter {
             let data = try JSONSerialization.data(withJSONObject: objects, options: .prettyPrinted)
             try data.write(to: workDir.appendingPathComponent("objects.json"))
             metadata["objects_path"] = "objects.json"
+        }
+        if let house = house { metadata["house"] = house }
+        if let room = roomPlanJSON {
+            try room.write(to: workDir.appendingPathComponent("roomplan.json"))
+            metadata["roomplan_path"] = "roomplan.json"
         }
         let metaJSON = workDir.appendingPathComponent("metadata.json")
         let jsonData = try JSONSerialization.data(withJSONObject: metadata, options: .prettyPrinted)
@@ -192,6 +201,11 @@ class FrameExporter {
             data.append(contentsOf: grey)
         }
         try data.write(to: url)
+    }
+
+    static func iosVersion() -> String {
+        let v = ProcessInfo.processInfo.operatingSystemVersion
+        return "\(v.majorVersion).\(v.minorVersion).\(v.patchVersion)"
     }
 
     private func deviceModel() -> String {
