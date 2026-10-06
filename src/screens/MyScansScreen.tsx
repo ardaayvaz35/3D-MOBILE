@@ -114,7 +114,14 @@ export default function MyScansScreen({ navigation }: Props) {
 
   const load = useCallback(async () => {
     try {
-      const [captures, properties] = await Promise.all([listCaptures(), listProperties()]);
+      const [captures, properties] = await Promise.all([
+        listCaptures(),
+        // Grouping is optional: without the properties table, scans show ungrouped.
+        listProperties().catch((e) => {
+          console.log('[myscans] listProperties failed, showing ungrouped:', e?.message ?? e);
+          return [] as PropertyRow[];
+        }),
+      ]);
       setItems(buildRows(captures, properties));
       setError(null);
     } catch (err: any) {
