@@ -80,7 +80,7 @@ export default function HomeScreen({ navigation }: Props) {
         <Pressable style={styles.card} onPress={() => navigation.navigate('HouseStart')}>
           <Text style={styles.cardTitle}>Ev tara (çok bölüm)</Text>
           <Text style={styles.cardSubtitle}>
-            Birkaç odalı ya da iki katlı evi bölüm bölüm tara; hepsi tek tur olarak birleşir.
+            Birkaç odalı ya da iki katlı evi bölüm bölüm tara; ara verip sonra kaldığın yerden devam edebilirsin.
           </Text>
         </Pressable>
 
