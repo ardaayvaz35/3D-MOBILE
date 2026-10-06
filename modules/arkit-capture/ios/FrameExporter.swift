@@ -84,6 +84,7 @@ class FrameExporter {
                 "segment": frame.segment,
             ]
             if let id = frame.objectId { meta["object_id"] = id }
+            meta["exposure_locked"] = frame.exposureLocked
             // ISO, white-balance gains (R, G, B) and their temperature/tint:
             // what the server needs to bring every frame to one scale.
             if let c = frame.camera {

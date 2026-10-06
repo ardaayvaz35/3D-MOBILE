@@ -61,6 +61,9 @@ class CaptureManager {
         let segment: Int
         /// Object whose walk-around this frame belongs to; nil = room frame.
         let objectId: String?
+        /// True when exposure and white balance were locked for this frame
+        /// (object mode); false = continuous auto.
+        let exposureLocked: Bool
     }
 
     struct ExportResult {
@@ -217,6 +220,14 @@ class CaptureManager {
     // Main thread.
     private var captureMode = "room"
     private var objectId: String?
+    /// Exposure and white balance are locked while in object mode (one piece's
+    /// frames then share one exposure; auto varied up to 4.5x while walking
+    /// around a dresser). `exposureLocked` = the lock fully took;
+    /// `exposureLockTried` = we touched the device, so leaving must restore auto.
+    /// `exposureEpoch` invalidates delayed lock / settle blocks after a mode flip.
+    private var exposureLocked = false
+    private var exposureLockTried = false
+    private var exposureEpoch = 0
     /// Boxes the user scanned, ARKit world, as objects.json wants them.
     private var objectBoxes: [[String: Any]] = []
     private var finder: ObjectFinder?
@@ -232,13 +243,52 @@ class CaptureManager {
         self.onObjects = onObjects
     }
 
+    /// Main thread. Waits for auto exposure to settle, then freezes it, so the
+    /// lock never grabs a frame full of one wall colour.
+    private func beginExposureLock() {
+        exposureEpoch += 1
+        guard !exposureLockTried else { return }  // already locked (paused -> object)
+        let epoch = exposureEpoch
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.autoSettleSeconds * 0.5 / 0.8) { [weak self] in
+            guard let self = self, self.isRecording, self.exposureEpoch == epoch,
+                  self.captureMode == "object" else { return }
+            self.exposureLockTried = true
+            self.exposureLocked = ArkitSessionHost.shared.lockExposureAndWhiteBalance()
+            // A lock that follows a room->object flip may still be inside the
+            // settle pause of an earlier unlock; frames resume now.
+            if self.vista == nil { self.framesPaused = false }
+        }
+    }
+
+    /// Main thread. Back to continuous centre-metered auto, frames not kept
+    /// while it re-settles (same gate as after a vista pass).
+    private func endExposureLock() {
+        exposureEpoch += 1
+        let epoch = exposureEpoch
+        guard exposureLockTried else { return }  // lock never happened (flip < 0.5 s)
+        exposureLockTried = false
+        exposureLocked = false
+        ArkitSessionHost.shared.beginMetering()
+        framesPaused = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.autoSettleSeconds) { [weak self] in
+            guard let self = self, self.exposureEpoch == epoch, self.vista == nil else { return }
+            self.framesPaused = false
+        }
+    }
+
     /// "room" | "object" | "paused" (black transition screen: the session
     /// keeps tracking, frames are not kept).
     func setCaptureMode(_ mode: String, objectId: String?) {
         let apply = {
+            let was = self.captureMode
             self.captureMode = mode
             self.objectId = mode == "object" ? objectId : nil
             self.guidance?.heightFree = mode != "room"
+            if self.isRecording && mode != was {
+                if mode == "object" { self.beginExposureLock() }
+                else if mode == "room" { self.endExposureLock() }
+                // "paused" keeps the lock until room mode resumes.
+            }
         }
         if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
     }
@@ -291,6 +341,9 @@ class CaptureManager {
         vistaCount = 0
         controlCount = 0
         framesPaused = false
+        exposureEpoch += 1
+        exposureLocked = false
+        exposureLockTried = false
         currentSegment = 0
         openingsHint = nil
         ArkitSessionHost.shared.coverage.reset()
@@ -323,6 +376,9 @@ class CaptureManager {
         let replaced = replacedSharper
         let inBandCount = framesInBand
         stateLock.unlock()
+        exposureEpoch += 1
+        exposureLocked = false
+        exposureLockTried = false
         ArkitSessionHost.shared.unlockExposureAndWhiteBalance()
         ArkitSessionHost.shared.coverageActive = false
         let finderFacts: [String: Any]
@@ -678,6 +734,7 @@ class CaptureManager {
 
         let segmentNow = currentSegment
         let objectNow = captureMode == "object" ? objectId : nil
+        let lockedNow = exposureLocked && captureMode == "object"
         workQueue.async { [weak self] in
             guard let self = self else { return }
             defer { self.endWork() }
@@ -689,7 +746,7 @@ class CaptureManager {
                             lightIntensity: lightIntensity, lightTemperature: lightTemperature,
                             thermalState: thermal,
                             coverage: coverageNow, inBand: inBand, segment: segmentNow,
-                            objectId: objectNow)
+                            objectId: objectNow, exposureLocked: lockedNow)
         }
     }
 
@@ -736,7 +793,8 @@ class CaptureManager {
                             exposureOffset: Float, camera: ArkitSessionHost.CameraSettings?,
                             lightIntensity: Double?, lightTemperature: Double?,
                             thermalState: Int, coverage: Double,
-                            inBand: Bool, segment: Int, objectId: String?) {
+                            inBand: Bool, segment: Int, objectId: String?,
+                            exposureLocked: Bool) {
         let started = CACurrentMediaTime()
         let rgbImage = CIImage(cvPixelBuffer: pixelBuffer)
 
@@ -862,7 +920,8 @@ class CaptureManager {
             processMs: processMs,
             bytes: bytesWritten,
             segment: segment,
-            objectId: objectId
+            objectId: objectId,
+            exposureLocked: exposureLocked
         ))
         let countNow = frameCount
         let bytesNow = imageBytesUsed
