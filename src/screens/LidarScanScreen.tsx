@@ -28,6 +28,11 @@ import {
   savePendingUpload,
   type PendingUpload,
 } from '../api/pendingUpload';
+import { useHouseCapture } from '../house/useHouseCapture';
+import { needsNewMap } from '../house/houseSession';
+import LabelPicker from '../house/LabelPicker';
+import RoomDoneSheet from '../house/RoomDoneSheet';
+import ResumeRelocalizeOverlay from '../house/ResumeRelocalizeOverlay';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'LidarScan'>;
 
@@ -39,8 +44,12 @@ const MIN_ANGLE_COVERAGE = 0.5; // ~6/12 sectors -- roughly half-way around
 const ARCHIVE_BUDGET_BYTES = 300 * 1024 * 1024;
 const mb = (bytes: number) => (bytes / (1024 * 1024)).toFixed(1);
 
-export default function LidarScanScreen({ navigation }: Props) {
+export default function LidarScanScreen({ navigation, route }: Props) {
   const available = isArkitModuleAvailable() && isLidarSupported();
+  // House session (spec 2026-10-05 §4): absent = the single-room scan, unchanged.
+  const houseParam = route.params?.house;
+  const hc = useHouseCapture(houseParam?.propertyId, houseParam?.resume ?? false);
+  const inHouse = !!houseParam && !!hc.house;
   const [recording, setRecording] = useState(false);
   const [frameCount, setFrameCount] = useState(0);
   const [angleCoverage, setAngleCoverage] = useState(0);
@@ -75,6 +84,10 @@ export default function LidarScanScreen({ navigation }: Props) {
   }, []);
 
   useEffect(() => onGuidance(setGuide), []);
+
+  useEffect(() => {
+    if (hc.house?.phase === 'finished') navigation.replace('MyScans');
+  }, [hc.house?.phase, navigation]);
 
   // A scan that was captured but never reached the server -- including one
   // lost to the app being killed mid-upload -- is offered back on arrival
@@ -138,6 +151,8 @@ export default function LidarScanScreen({ navigation }: Props) {
   }
 
   const toggleRecording = async () => {
+    // A house segment starts only after its labels are picked (and, when resuming, the map is found).
+    if (inHouse && !recording && hc.house?.phase !== 'ready') return;
     if (!recording) {
       setFrameCount(0);
       setAngleCoverage(0);
@@ -149,6 +164,8 @@ export default function LidarScanScreen({ navigation }: Props) {
       v.reset();
       om.reset();
       startLidarRecording();
+      // After start: setHouseInfo needs the running CaptureManager.
+      if (inHouse) hc.recordingStarted();
       setRecording(true);
       return;
     }
@@ -209,6 +226,13 @@ export default function LidarScanScreen({ navigation }: Props) {
     try {
       await v.prepareStop();
       const result = await stopLidarRecording();
+      if (inHouse) {
+        // The house record is persistent and its queue uploads the segment;
+        // the session keeps running so the next segment shares coordinates.
+        await hc.segmentFinished(result.archivePath, result.frameCount, v.floorY());
+        setBusy(false);
+        return;
+      }
       // Record the archive BEFORE uploading. Everything after this point can
       // fail or be killed by the OS, and without this the scan would be
       // unrecoverable -- which is what happened to a 2.6-minute scan that
@@ -379,7 +403,38 @@ export default function LidarScanScreen({ navigation }: Props) {
             </View>
           ) : null}
 
-          {pending && !recording && !busy ? (
+          {inHouse && hc.house?.phase === 'pickLabels' ? <LabelPicker onDone={hc.pickLabels} /> : null}
+          {inHouse && hc.house?.phase === 'resuming' ? (
+            <ResumeRelocalizeOverlay
+              hint={hc.hint}
+              reason={hc.tracking.reason}
+              onNewMap={hc.startNewMapNow}
+              onCancel={() => navigation.goBack()}
+            />
+          ) : null}
+          {inHouse && hc.house && hc.house.phase === 'roomDone' ? (
+            <RoomDoneSheet
+              segmentCount={hc.house.segments.length}
+              uploadLine={hc.uploadLine}
+              newMapNext={needsNewMap(hc.house)}
+              onContinue={hc.continueHouse}
+              onFinish={hc.finishHouse}
+              onRetry={hc.house.segments.some((s) => s.upload === 'failed') ? hc.retryUploads : null}
+            />
+          ) : null}
+          {inHouse && hc.house && hc.house.phase === 'finishing' ? (
+            <View style={styles.pendingBanner}>
+              <Text style={styles.pendingTitle}>Ev tamamlanıyor</Text>
+              <Text style={styles.pendingBody}>{hc.uploadLine || 'Yükleniyor…'}</Text>
+              {hc.house.segments.some((s) => s.upload === 'failed') ? (
+                <Pressable onPress={hc.retryUploads}>
+                  <Text style={styles.pendingTitle}>Tekrar dene</Text>
+                </Pressable>
+              ) : null}
+            </View>
+          ) : null}
+
+          {!inHouse && pending && !recording && !busy ? (
             <Pressable style={styles.pendingBanner} onPress={() => sendArchive(pending.archivePath)}>
               <Text style={styles.pendingTitle}>Yüklenmemiş tarama var</Text>
               <Text style={styles.pendingBody}>
@@ -461,12 +516,15 @@ export default function LidarScanScreen({ navigation }: Props) {
             <Pressable
               style={[styles.recordButton, recording && styles.recordButtonActive]}
               onPress={toggleRecording}
-              disabled={busy || v.vistaRole !== null || v.segmentBusy}
+              disabled={
+                busy || v.vistaRole !== null || v.segmentBusy ||
+                (inHouse && !recording && hc.house?.phase !== 'ready')
+              }
             >
               {busy ? (
                 <ActivityIndicator color="#fff" />
               ) : (
-                <Text style={styles.buttonText}>{recording ? 'Durdur ve Yükle' : 'Başlat'}</Text>
+                <Text style={styles.buttonText}>{recording ? (inHouse ? 'Odayı bitir' : 'Durdur ve Yükle') : 'Başlat'}</Text>
               )}
             </Pressable>
           </View>
