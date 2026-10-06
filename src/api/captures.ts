@@ -263,12 +263,15 @@ export type CaptureListItem = {
   status: CaptureStatusValue;
   client_type: ClientType;
   created_at: string;
+  property_id: string | null;
+  segment_index: number | null;
+  labels: string[] | null;
 };
 
 export async function listCaptures(): Promise<CaptureListItem[]> {
   const { data, error } = await supabase
     .from('captures')
-    .select('id, status, client_type, created_at')
+    .select('id, status, client_type, created_at, property_id, segment_index, labels')
     .order('created_at', { ascending: false });
   if (error) throw new Error(`Taramalar alınamadı: ${error.message}`);
   return (data ?? []) as CaptureListItem[];

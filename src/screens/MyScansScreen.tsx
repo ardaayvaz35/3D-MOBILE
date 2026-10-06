@@ -13,6 +13,8 @@ import { useFocusEffect } from '@react-navigation/native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
 import { listCaptures, type CaptureListItem } from '../api/captures';
+import { listProperties, type PropertyRow } from '../api/houses';
+import { LABEL_NAMES } from '../house/houseSession';
 import type { CaptureStatusValue, ClientType } from '../types/capture';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'MyScans'>;
@@ -54,6 +56,42 @@ const IN_PROGRESS: CaptureStatusValue[] = [
   'exporting',
 ];
 
+const PROPERTY_STATUS_LABELS: Record<string, string> = {
+  scanning: 'Taranıyor',
+  processing: 'İşleniyor',
+  ready: 'Hazır ✓',
+  failed: 'Başarısız',
+};
+
+type ListRow =
+  | { kind: 'house'; property: PropertyRow }
+  | { kind: 'capture'; capture: CaptureListItem; inHouse: boolean };
+
+function segmentTitle(c: CaptureListItem): string {
+  if (c.labels && c.labels.length) {
+    return c.labels.map((l) => (LABEL_NAMES as Record<string, string>)[l] ?? l).join(' + ');
+  }
+  return `Bölüm ${(c.segment_index ?? 0) + 1}`;
+}
+
+// Each house gets a header row followed by its segments in scan order; scans
+// without a house (or whose house is unknown) follow as before.
+function buildRows(captures: CaptureListItem[], properties: PropertyRow[]): ListRow[] {
+  const known = new Set(properties.map((p) => p.id));
+  const rows: ListRow[] = [];
+  for (const property of properties) {
+    rows.push({ kind: 'house', property });
+    captures
+      .filter((c) => c.property_id === property.id)
+      .sort((a, b) => (a.segment_index ?? 0) - (b.segment_index ?? 0))
+      .forEach((capture) => rows.push({ kind: 'capture', capture, inHouse: true }));
+  }
+  captures
+    .filter((c) => !c.property_id || !known.has(c.property_id))
+    .forEach((capture) => rows.push({ kind: 'capture', capture, inHouse: false }));
+  return rows;
+}
+
 function formatDate(iso: string): string {
   try {
     const d = new Date(iso);
@@ -69,15 +107,15 @@ function formatDate(iso: string): string {
 }
 
 export default function MyScansScreen({ navigation }: Props) {
-  const [items, setItems] = useState<CaptureListItem[]>([]);
+  const [items, setItems] = useState<ListRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const data = await listCaptures();
-      setItems(data);
+      const [captures, properties] = await Promise.all([listCaptures(), listProperties()]);
+      setItems(buildRows(captures, properties));
       setError(null);
     } catch (err: any) {
       setError(err?.message ?? String(err));
@@ -108,11 +146,22 @@ export default function MyScansScreen({ navigation }: Props) {
     }
   };
 
-  const renderItem = ({ item }: { item: CaptureListItem }) => {
+  const renderItem = ({ item: row }: { item: ListRow }) => {
+    if (row.kind === 'house') {
+      const p = row.property;
+      return (
+        <View style={styles.houseHeader}>
+          <Text style={styles.houseTitle}>
+            🏠 {p.name} · {p.room_count} bölüm · {PROPERTY_STATUS_LABELS[p.status] ?? p.status}
+          </Text>
+        </View>
+      );
+    }
+    const item = row.capture;
     const inProgress = IN_PROGRESS.includes(item.status);
     return (
       <Pressable
-        style={styles.card}
+        style={[styles.card, row.inHouse && styles.cardInHouse]}
         onPress={() => openScan(item)}
         disabled={item.status === 'failed'}
       >
@@ -128,7 +177,9 @@ export default function MyScansScreen({ navigation }: Props) {
           </View>
           <View style={styles.cardInfo}>
             <Text style={styles.cardTitle}>
-              {CLIENT_LABELS[item.client_type] ?? item.client_type} taraması
+              {row.inHouse
+                ? segmentTitle(item)
+                : `${CLIENT_LABELS[item.client_type] ?? item.client_type} taraması`}
             </Text>
             <Text style={styles.cardDate}>{formatDate(item.created_at)}</Text>
           </View>
@@ -154,7 +205,7 @@ export default function MyScansScreen({ navigation }: Props) {
     <SafeAreaView style={styles.container}>
       <FlatList
         data={items}
-        keyExtractor={(item) => item.id}
+        keyExtractor={(row) => (row.kind === 'house' ? `house-${row.property.id}` : row.capture.id)}
         renderItem={renderItem}
         contentContainerStyle={items.length === 0 ? styles.emptyWrap : styles.listContent}
         refreshControl={
@@ -195,6 +246,9 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#2c2c2e',
   },
+  cardInHouse: { marginLeft: 16 },
+  houseHeader: { paddingTop: 8 },
+  houseTitle: { color: '#fff', fontSize: 16, fontWeight: '700' },
   cardLeft: { flexDirection: 'row', alignItems: 'center', gap: 12, flex: 1 },
   thumb: {
     width: 44,
