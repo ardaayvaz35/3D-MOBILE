@@ -9,7 +9,8 @@ export type RootStackParamList = {
   MyScans: undefined;
   PhotoScan: undefined;
   VideoScan: undefined;
-  LidarScan: undefined;
+  LidarScan: { house?: { propertyId: string; resume: boolean } } | undefined;
+  HouseStart: undefined;
   WindowScan: undefined;
   Status: { captureId: string };
   Viewer: { captureId: string };

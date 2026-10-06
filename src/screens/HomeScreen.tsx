@@ -77,6 +77,13 @@ export default function HomeScreen({ navigation }: Props) {
           </Text>
         </Pressable>
 
+        <Pressable style={styles.card} onPress={() => navigation.navigate('HouseStart')}>
+          <Text style={styles.cardTitle}>Ev tara (çok bölüm)</Text>
+          <Text style={styles.cardSubtitle}>
+            Birkaç odalı ya da iki katlı evi bölüm bölüm tara; hepsi tek tur olarak birleşir.
+          </Text>
+        </Pressable>
+
         <Pressable style={styles.card} onPress={() => navigation.navigate('PhotoScan')}>
           <Text style={styles.cardTitle}>Foto ile Test Et</Text>
           <Text style={styles.cardSubtitle}>
