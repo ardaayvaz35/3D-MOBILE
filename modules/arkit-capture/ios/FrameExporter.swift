@@ -74,9 +74,11 @@ class FrameExporter {
                 // correction and silently wrong if guessed.
                 "depth_width": frame.depthWidth,
                 "depth_height": frame.depthHeight,
-                // Auto exposure: these vary per frame (see camera fields below).
+                // Exposure varies per frame unless locked (see camera fields below).
                 "exposure_duration": frame.exposureDuration,
                 "exposure_offset": frame.exposureOffset,
+                // Stays "auto": the worker's normalizer keys on it. The lock
+                // state is in "exposure_locked".
                 "exposure_mode": "auto",
                 // 0 nominal .. 3 critical, and ms spent saving the frame.
                 "thermal_state": frame.thermalState,
