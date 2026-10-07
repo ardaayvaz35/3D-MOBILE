@@ -246,6 +246,46 @@ export function makeDome(o: RoomPlanObject, eyeY: number, walls: RoomPlanWall[],
   return out;
 }
 
+/** Shell margin around the footprint's circumscribed ellipse, and above the piece's top. */
+export const DOME_PAD_M = 0.10;
+export const DOME_TOP_PAD_M = 0.05;
+
+export type DomeShell = {
+  center: Vec3;
+  /** Radians, same convention as boxCorners: box x axis -> (cos, 0, -sin). */
+  yaw: number;
+  floorY: number;
+  /** Base ellipse semi-axes along the piece's x and z axes. */
+  semiAxes: [number, number];
+  topY: number;
+  /** Ring 0 is the lowest band (makeDome: ring 0 = farthest level = lowest elevation). */
+  slices: { ring: number; azimuth: number; state: 'empty' | 'filled' | 'unreachable' }[];
+  rings: number;
+  azimuths: number;
+};
+
+/**
+ * The dome as the AR view draws it (ArkitPreviewView.rebuildDome, which stays
+ * dumb). Azimuth is world degrees like makeDome (h = (sin az, 0, -cos az));
+ * azimuths makeDome dropped (wall side) are absent, so they stay open.
+ */
+export function domeShell(o: RoomPlanObject, dome: Slice[], floorY?: number | null): DomeShell {
+  return {
+    center: o.center,
+    yaw: o.yaw_deg * RAD,
+    floorY: floorY ?? o.center[1] - o.size[1] / 2,
+    semiAxes: [(o.size[0] / 2) * Math.SQRT2 + DOME_PAD_M, (o.size[2] / 2) * Math.SQRT2 + DOME_PAD_M],
+    topY: o.center[1] + o.size[1] / 2 + DOME_TOP_PAD_M,
+    slices: dome.map((s) => ({
+      ring: s.ring,
+      azimuth: s.azimuth,
+      state: s.filled ? 'filled' : s.reachable ? 'empty' : 'unreachable',
+    })),
+    rings: LEVEL_DISTANCES.length,
+    azimuths: AZIMUTHS,
+  };
+}
+
 /** Farthest a filling frame may be, in close distances. */
 export const MAX_DIST_MUL = 1.35;
 

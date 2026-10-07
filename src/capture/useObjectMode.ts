@@ -12,7 +12,7 @@ import type {
   RoomPlanObject,
   RoomPlanWall,
 } from '../../modules/arkit-capture/src/ArkitCapture.types';
-import { onObjects, onPose, setCaptureMode, setObjectBoxes } from '../native/arkitCapture';
+import { onObjects, onPose, setCaptureMode, setDome, setDoneObjectBoxes, setObjectBoxes } from '../native/arkitCapture';
 import {
   angleDeg,
   approachPoint,
@@ -21,6 +21,7 @@ import {
   displayName,
   domeComplete,
   domeProgress,
+  domeShell,
   exportBox,
   footprintDistance,
   makeDome,
@@ -103,6 +104,9 @@ export function useObjectMode(
   const grid = useRef<Grid | null>(null);
   const lastGrid = useRef(0);
   const sentMode = useRef('');
+  /** Last finished-pieces list / dome sent to the native preview (to send changes only). */
+  const sentDone = useRef('');
+  const sentDome = useRef('');
   /**
    * Room lock height (ARKit y), from guidance payloads: lock = y - heightDeviation.
    * On the black screens the native side skips the frame path, guidance
@@ -132,6 +136,10 @@ export function useObjectMode(
     grid.current = null;
     lastGrid.current = 0;
     sentMode.current = '';
+    sentDone.current = '';
+    sentDome.current = '';
+    setDoneObjectBoxes([]);
+    setDome(null);
     lockSamples.current = [];
     lockY.current = null;
     lastGuide.current = null;
@@ -175,6 +183,34 @@ export function useObjectMode(
     if (tag === sentMode.current) return;
     sentMode.current = tag;
     setCaptureMode(n.mode, n.objectId);
+  };
+
+  /** Finished (scanned) pieces: native paints their mesh green. Sends on change only. */
+  const syncDone = () => {
+    const ids = [...scanned.current].filter((id) => done.current.has(id)).sort();
+    const key = ids.join('|');
+    if (key === sentDone.current) return;
+    sentDone.current = key;
+    setDoneObjectBoxes(ids.map((id) => objects.current.get(id)).filter(Boolean).map((o) => exportBox(o!)));
+  };
+
+  /** The dome shell around the current piece; cleared outside object mode. Sends on change only. */
+  const syncDome = () => {
+    const s = state.current;
+    const o = s.kind === 'object' ? objects.current.get(s.id) : undefined;
+    const d = o ? domes.current.get(o.id) : undefined;
+    if (!o || !d) {
+      if (sentDome.current !== '') {
+        sentDome.current = '';
+        setDome(null);
+      }
+      return;
+    }
+    const shell = domeShell(o, d, floor.floorY());
+    const key = JSON.stringify(shell);
+    if (key === sentDome.current) return;
+    sentDome.current = key;
+    setDome(shell);
   };
 
   useEffect(() => {
@@ -237,7 +273,9 @@ export function useObjectMode(
         }
         state.current = s1;
         applyNative();
+        syncDone();
       }
+      syncDome();
 
       // Walk arrow route, a couple of times a second.
       if (now - lastRoute.current >= ROUTE_EVERY_S) {
@@ -347,6 +385,7 @@ export function useObjectMode(
     /** Leave a piece out of the tour's walk-arounds. */
     skip: (id: string) => {
       done.current.add(id);
+      syncDone();
       setTick((t) => t + 1);
     },
   };

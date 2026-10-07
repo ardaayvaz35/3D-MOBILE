@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { RoomPlanObject, RoomPlanWall } from '../../modules/arkit-capture/src/ArkitCapture.types.ts';
 import {
-  aimedAt, approachPoint, AZIMUTHS, blockedByWall, boxCorners, closeDistance, displayName, domeComplete, domeProgress,
+  aimedAt, approachPoint, AZIMUTHS, blockedByWall, boxCorners, closeDistance, displayName, DOME_TOP_PAD_M, domeComplete, domeProgress, domeShell,
   ENTER_AIM_S, ENTER_BLACK_S, exportBox, footprintDistance, makeDome, type ModeState, nativeMode, nextSlice,
   PHONE_MAX_M, refreshDome, samePiece, sliceFor, sliceHint, stepMode, wantsOwnScan, type Vec3,
 } from './objectMode.ts';
@@ -205,4 +205,44 @@ test('same piece under a new RoomPlan id (device test: one desk, 5 ids)', () => 
   assert.ok(samePiece(desk, again));
   assert.ok(!samePiece(desk, other)); // the second desk, 1.2 m away
   assert.ok(!samePiece(desk, { ...again, category: 'chair' }));
+});
+
+test('domeShell: base covers the footprint, apex above the top, states mapped', () => {
+  const turned = { ...dresser, yaw_deg: 30 };
+  const dome = makeDome(turned, 1.5, []);
+  dome[0].filled = true;
+  dome[1].reachable = false;
+  const d = domeShell(turned, dome, 0);
+  near(d.yaw, (30 * Math.PI) / 180);
+  near(d.floorY, 0);
+  near(d.topY, 0.4 + 0.4 + DOME_TOP_PAD_M);
+  near(d.topY, 0.85);
+  // Every footprint corner lies inside the base ellipse (in the piece's own axes).
+  const c = Math.cos(d.yaw);
+  const s = Math.sin(d.yaw);
+  for (const p of boxCorners(turned).filter((q) => q[1] < 0.4)) {
+    const rx = p[0] - d.center[0];
+    const rz = p[2] - d.center[2];
+    const u = rx * c - rz * s; // along box x (cos, 0, -sin)
+    const v = rx * s + rz * c; // along box z (sin, 0, cos)
+    assert.ok((u / d.semiAxes[0]) ** 2 + (v / d.semiAxes[1]) ** 2 < 1, 'corner inside base');
+  }
+  assert.equal(d.slices.length, 36);
+  assert.equal(d.slices[0].state, 'filled');
+  assert.equal(d.slices[1].state, 'unreachable');
+  assert.equal(d.slices[2].state, 'empty');
+  assert.equal(d.rings, 3);
+  assert.equal(d.azimuths, 12);
+  // Floor unknown: the box bottom.
+  near(domeShell(dresser, dome).floorY, 0);
+});
+
+test('domeShell: wall-blocked azimuths are absent', () => {
+  const wall: RoomPlanWall = { center: [2, 1.2, -0.4], width: 4, yaw_deg: 0 };
+  const dome = makeDome(dresser, 1.5, [wall]);
+  const d = domeShell(dresser, dome, 0);
+  assert.ok(d.slices.length < 36);
+  assert.equal(d.slices.length, dome.length);
+  assert.ok(!d.slices.some((s) => s.azimuth === 0)); // h = (0,0,-1) faces the wall
+  assert.ok(d.slices.some((s) => s.azimuth === 180));
 });

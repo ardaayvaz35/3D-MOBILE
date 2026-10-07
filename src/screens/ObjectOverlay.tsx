@@ -113,8 +113,10 @@ export default function ObjectOverlay({ pose, om, floorY, width, height }: Props
   return (
     <View style={StyleSheet.absoluteFill} pointerEvents="none">
       {om.objects.map(({ o, name, done }) => {
+        // A finished piece shows nothing: no box, no name (its mesh turns green natively).
+        if (done) return null;
         if (inObject && om.current && o.id !== om.current.id) return null;
-        const color = done ? '#4ade80' : om.current?.id === o.id ? '#ffffff' : '#facc15';
+        const color = om.current?.id === o.id ? '#ffffff' : '#facc15';
         const c = boxCorners(o).map((p) => projectPoint(p, pose, width, height));
         const top = projectPoint([o.center[0], o.center[1] + o.size[1] / 2 + 0.08, o.center[2]], pose, width, height);
         return (
@@ -128,7 +130,6 @@ export default function ObjectOverlay({ pose, om, floorY, width, height }: Props
               <View style={[styles.tag, { left: top.x - 60, top: top.y - 14, borderColor: color }]}>
                 <Text style={styles.tagText} numberOfLines={1}>
                   {name}
-                  {done ? ' · tamam' : ''}
                 </Text>
               </View>
             ) : null}

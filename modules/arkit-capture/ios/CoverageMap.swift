@@ -232,10 +232,11 @@ final class CoverageMap {
     /// Per-vertex RGBA (Float32) for one mesh anchor's vertices, read from a
     /// COPY of the vertex buffer: ARKit reuses and overwrites its own.
     func vertexColors(vertexData: Data, offset: Int, stride: Int, count: Int,
-                      anchorTransform: simd_float4x4) -> Data {
+                      anchorTransform: simd_float4x4, paintCoverage: Bool = true,
+                      doneBoxes: [DoneBox] = []) -> Data {
         var rgba = [Float](repeating: 0, count: count * 4)
         lock.lock()
-        rebuildTargetsIfNeeded()
+        if paintCoverage { rebuildTargetsIfNeeded() }
         var lastCell: (Int64, Int64, Int64, Int64, Int64, Int64)? = nil
         var lastState = State.blue
         vertexData.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
@@ -247,6 +248,18 @@ final class CoverageMap {
                                         raw.loadUnaligned(fromByteOffset: o + 8, as: Float.self),
                                         1)
                 let world = anchorTransform * local
+                // A finished piece (object mode) is green whatever the
+                // coverage says, and shows even with coverage painting off
+                // (then every other vertex stays fully transparent).
+                if doneBoxes.contains(where: { $0.contains(world) }) {
+                    let g = Self.doneGreen
+                    rgba[i * 4] = g.0
+                    rgba[i * 4 + 1] = g.1
+                    rgba[i * 4 + 2] = g.2
+                    rgba[i * 4 + 3] = g.3
+                    continue
+                }
+                guard paintCoverage else { continue }
                 var state = State.blue
                 if let cell = Self.cell(simd_float3(world.x, world.y, world.z)) {
                     if let last = lastCell, last == cell {
@@ -556,6 +569,9 @@ final class CoverageMap {
 
     /// Drawn as one half-transparent layer (see ArkitPreviewView), so the
     /// alpha here is what keeps the camera image visible underneath.
+    /// #4ade80, same alpha as the covered colour above.
+    static let doneGreen: (Float, Float, Float, Float) = (0.29, 0.87, 0.50, 0.55)
+
     private static func color(_ state: UInt8) -> (Float, Float, Float, Float) {
         switch state {
         case State.green: return (0.15, 0.90, 0.35, 0.55)
@@ -589,5 +605,33 @@ final class CoverageMap {
     /// 21 bits per axis: unique within +/-100 km of the session origin.
     private static func pack(_ x: Int64, _ y: Int64, _ z: Int64) -> Int64 {
         ((x & 0x1FFFFF) << 42) | ((y & 0x1FFFFF) << 21) | (z & 0x1FFFFF)
+    }
+}
+
+/// A scanned piece's box (object mode), for painting its mesh green. Same
+/// oriented-box test as ObjectFinder.meshCheck, grown 5 cm.
+struct DoneBox {
+    let inverse: simd_float4x4
+    let half: simd_float3
+
+    /// JSON as setObjectBoxes sends it: center, size, yaw_deg (x axis -> (cos, 0, -sin)).
+    init?(json: [String: Any]) {
+        guard let c = (json["center"] as? [NSNumber])?.map({ Float(truncating: $0) }), c.count == 3,
+              let s = (json["size"] as? [NSNumber])?.map({ Float(truncating: $0) }), s.count == 3 else { return nil }
+        let yaw = Float(truncating: (json["yaw_deg"] as? NSNumber) ?? 0) * Float.pi / 180
+        let cs = cos(yaw)
+        let sn = sin(yaw)
+        let t = simd_float4x4(columns: (
+            simd_float4(cs, 0, -sn, 0),
+            simd_float4(0, 1, 0, 0),
+            simd_float4(sn, 0, cs, 0),
+            simd_float4(c[0], c[1], c[2], 1)))
+        inverse = t.inverse
+        half = simd_float3(s[0], s[1], s[2]) / 2 + simd_float3(repeating: 0.05)
+    }
+
+    func contains(_ world: simd_float4) -> Bool {
+        let l = inverse * world
+        return abs(l.x) <= half.x && abs(l.y) <= half.y && abs(l.z) <= half.z
     }
 }

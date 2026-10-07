@@ -31,6 +31,8 @@ type NativeModuleShape = {
   endVista(openingIds: string[]): Promise<number>;
   setCaptureMode(mode: string, objectId: string | null): void;
   setObjectBoxes(json: string): void;
+  setDoneObjectBoxes(json: string): void;
+  setDome(json: string): void;
   addListener(eventName: 'onObjects', listener: (payload: ObjectsPayload) => void): { remove: () => void };
   addListener(eventName: 'onPose', listener: (payload: PosePayload) => void): { remove: () => void };
   addListener(
@@ -199,6 +201,16 @@ export function setCaptureMode(mode: 'room' | 'object' | 'paused', objectId: str
 /** Boxes of the scanned objects (ARKit world), written into objects.json at export. */
 export function setObjectBoxes(boxes: object[]): void {
   nativeModule?.setObjectBoxes(JSON.stringify(boxes));
+}
+
+/** Boxes of the finished pieces: their mesh is painted green in the preview. */
+export function setDoneObjectBoxes(boxes: object[]): void {
+  nativeModule?.setDoneObjectBoxes(JSON.stringify(boxes));
+}
+
+/** Dome shell around the current piece (objectMode.domeShell); null removes it. */
+export function setDome(dome: object | null): void {
+  nativeModule?.setDome(dome ? JSON.stringify(dome) : '');
 }
 
 /** RoomPlan's furniture boxes and walls, about once a second while recording. */
