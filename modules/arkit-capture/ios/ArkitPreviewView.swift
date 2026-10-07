@@ -497,11 +497,16 @@ class ArkitPreviewView: ExpoView, ARSCNViewDelegate {
         let a = axesAB[0]
         let b = axesAB[1]
         let height = topY - floorY
-        // Ellipsoid point at world azimuth phi and elevation theta (radians).
+        // Superellipse profile r^p + y^p = 1 (domeShell's `profile`): flatter
+        // than an ellipsoid so a flat-topped piece stays inside with the apex
+        // at its top.
+        let e = 2 / max(2, (spec["profile"] as? NSNumber)?.floatValue ?? 2)
+        // Shell point at world azimuth phi and elevation parameter theta (radians).
         func point(_ phi: Float, _ theta: Float) -> SCNVector3 {
             let h = simd_float3(sin(phi), 0, -cos(phi))
-            let flat = ax * (a * simd_dot(h, ax) * cos(theta)) + az * (b * simd_dot(h, az) * cos(theta))
-            return SCNVector3(center[0] + flat.x, floorY + height * sin(theta), center[2] + flat.z)
+            let r = pow(max(0, cos(theta)), e)
+            let flat = ax * (a * simd_dot(h, ax) * r) + az * (b * simd_dot(h, az) * r)
+            return SCNVector3(center[0] + flat.x, floorY + height * pow(max(0, sin(theta)), e), center[2] + flat.z)
         }
 
         var positions: [SCNVector3] = []

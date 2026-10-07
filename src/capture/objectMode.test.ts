@@ -237,6 +237,28 @@ test('domeShell: base covers the footprint, apex above the top, states mapped', 
   near(domeShell(dresser, dome).floorY, 0);
 });
 
+test('domeShell: apex at the top, every box corner inside the shell (dresser, bed, wardrobe)', () => {
+  const pieces = [
+    dresser,
+    { ...dresser, size: [2.0, 0.5, 1.6] as Vec3, center: [0, 0.25, 0] as Vec3, yaw_deg: 20 },
+    { ...dresser, size: [1.2, 2.0, 0.6] as Vec3, center: [0, 1.0, 0] as Vec3, yaw_deg: 75 },
+  ];
+  for (const o of pieces) {
+    const d = domeShell(o, makeDome(o, 1.5, []), o.center[1] - o.size[1] / 2);
+    near(d.topY, o.center[1] + o.size[1] / 2 + DOME_TOP_PAD_M);
+    const c = Math.cos(d.yaw);
+    const s = Math.sin(d.yaw);
+    const H = d.topY - d.floorY;
+    for (const p of boxCorners(o)) {
+      const rx = p[0] - d.center[0];
+      const rz = p[2] - d.center[2];
+      const r = Math.hypot((rx * c - rz * s) / d.semiAxes[0], (rx * s + rz * c) / d.semiAxes[1]);
+      const t = (p[1] - d.floorY) / H;
+      assert.ok(r ** d.profile + t ** d.profile <= 1 + 1e-9, `corner inside shell (size ${o.size})`);
+    }
+  }
+});
+
 test('domeShell: wall-blocked azimuths are absent', () => {
   const wall: RoomPlanWall = { center: [2, 1.2, -0.4], width: 4, yaw_deg: 0 };
   const dome = makeDome(dresser, 1.5, [wall]);
