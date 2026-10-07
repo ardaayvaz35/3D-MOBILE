@@ -28,6 +28,13 @@ final class WindowShotSession {
         let highRes: Bool
         let timestamp: TimeInterval
         let trackingNormal: Bool
+        /// LiDAR of the same frame (vista pass inside a recording): tells the
+        /// server which pixels are the building (railing, ceiling, pillars)
+        /// rather than the view. Empty when the frame had none.
+        let depthFile: String
+        let confidenceFile: String
+        let depthWidth: Int
+        let depthHeight: Int
     }
 
     static let evSteps: [Float] = [-1.5, 0, 1.5]
@@ -139,6 +146,11 @@ final class WindowShotSession {
         } catch {
             return .failure(error)
         }
+        var dep = (depth: "", confidence: "", width: 0, height: 0)
+        if let df = frame.smoothedSceneDepth ?? frame.sceneDepth {
+            dep = DepthFiles.save(depth: df.depthMap, confidence: df.confidenceMap, dir: dir,
+                                  stem: (name as NSString).deletingPathExtension)
+        }
         shots.append(Shot(
             group: group, evBias: ev, file: name,
             transform: frame.camera.transform,
@@ -150,7 +162,9 @@ final class WindowShotSession {
             trackingNormal: {
                 if case .normal = frame.camera.trackingState { return true }
                 return false
-            }()))
+            }(),
+            depthFile: dep.depth, confidenceFile: dep.confidence,
+            depthWidth: dep.width, depthHeight: dep.height))
         return .success(())
     }
 
@@ -192,6 +206,10 @@ final class WindowShotSession {
                 "high_res": s.highRes,
                 "timestamp_ns": Int(s.timestamp * 1_000_000_000),
                 "tracking_normal": s.trackingNormal,
+                "depth_path": s.depthFile,
+                "confidence_path": s.confidenceFile,
+                "depth_width": s.depthWidth,
+                "depth_height": s.depthHeight,
             ]
         }
     }

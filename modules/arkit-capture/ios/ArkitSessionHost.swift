@@ -502,6 +502,9 @@ final class ArkitSessionHost: NSObject, ARSessionDelegate {
     }
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        // Before the recording sees the frame: the frame's settling state
+        // depends on this metering.
+        FastExposure.shared.process(frame)
         onFrame?(frame)
         chainedDelegate?.session?(session, didUpdate: frame)
     }

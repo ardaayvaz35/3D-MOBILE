@@ -95,6 +95,13 @@ class FrameExporter {
                 meta["wb_tint"] = c.tint
                 meta["device_exposure_duration"] = c.duration
             }
+            // Fast exposure (FastExposure): "exposure_mode" stays "auto" -- the
+            // exposure still changes between frames, which is what the server's
+            // normalization keys on.
+            meta["exposure_control"] = frame.exposureInfo.control
+            meta["exposure_error_ev"] = (frame.exposureInfo.errorEV * 100).rounded() / 100
+            meta["clip_fraction"] = (frame.exposureInfo.clip * 1000).rounded() / 1000
+            meta["tone_mapping"] = frame.exposureInfo.toneMapping
             if let v = frame.lightIntensity { meta["light_intensity"] = v }
             if let v = frame.lightTemperature { meta["light_temperature_k"] = v }
             frameMetas.append(meta)

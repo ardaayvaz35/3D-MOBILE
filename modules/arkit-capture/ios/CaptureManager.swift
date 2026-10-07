@@ -18,6 +18,13 @@ import simd
 /// (that needs the ARKit mesh + occlusion analysis) -- it's a cheap proxy
 /// that still catches the single most common bad-scan pattern: standing
 /// still and only panning, or only covering one side of the object.
+struct ExposureInfo {
+    let control: String       // "fast" (FastExposure) or "auto" (iOS)
+    let errorEV: Float
+    let clip: Float
+    let toneMapping: String   // "on" / "off" / "unsupported"
+}
+
 class CaptureManager {
 
     struct FrameData {
@@ -45,6 +52,9 @@ class CaptureManager {
         /// ISO, white-balance gains and their colour temperature; nil when the
         /// device could not be read (before iOS 16).
         let camera: ArkitSessionHost.CameraSettings?
+        /// Who drove the exposure and how far off the metering was when the
+        /// frame was kept, the share of clipped pixels, and the tone curve mode.
+        let exposureInfo: ExposureInfo
         /// ARKit's own light estimate for the frame (lumens ~1000 = neutral,
         /// Kelvin), independent of the camera's white balance.
         let lightIntensity: Double?
@@ -145,6 +155,12 @@ class CaptureManager {
     private(set) var skippedBlurred = 0
     private(set) var skippedRedundant = 0
     private(set) var skippedBusy = 0
+    /// Frames not kept because the exposure was still settling (FastExposure).
+    private(set) var skippedExposure = 0
+    /// What drove the exposure this recording ("fast" / "auto") and the tone
+    /// curve mode, read when the recording started (stop() resets them).
+    private var exposureControlUsed = "auto"
+    private var toneMappingUsed = "off"
     private var maxThermalState = 0
 
     // Saving a frame (JPEG encode of a 1920x1440 image, depth and confidence
@@ -275,6 +291,7 @@ class CaptureManager {
         lastCaptureTime = 0
         nextIndex = 0
         skippedBusy = 0
+        skippedExposure = 0
         maxThermalState = 0
         visitedSectors.removeAll()
         keptPoses.removeAll()
@@ -289,9 +306,13 @@ class CaptureManager {
         // would be shipped inside this one. Start from an empty directory.
         try? FileManager.default.removeItem(at: tempDir)
         try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        // Continuous auto exposure and white balance, metered on the centre:
-        // each room is exposed for its own light. See CameraSettings.
+        // Continuous auto white balance, metered on the centre, and our own
+        // fast exposure on top: each room is exposed for its own light within
+        // a few camera frames. See CameraSettings and FastExposure.
         ArkitSessionHost.shared.beginMetering()
+        FastExposure.shared.start()
+        exposureControlUsed = FastExposure.shared.lastControl
+        toneMappingUsed = FastExposure.shared.toneMapping
         segments.removeAll()
         vistas.removeAll()
         vista = nil
@@ -321,6 +342,7 @@ class CaptureManager {
     func stopRecordingAndExport() throws -> ExportResult {
         if vista != nil { _ = try? endVista(openingIds: []) }
         isRecording = false
+        FastExposure.shared.stop()
         // Let the frame being written finish, so it is in the archive and its
         // files are not zipped half-written.
         workQueue.sync {}
@@ -382,7 +404,8 @@ class CaptureManager {
 
         print("[capture] exporting \(savedFrames.count) frames "
               + "(\(bytesUsed / 1_048_576) MB; skipped \(skippedBlurred) blurred, "
-              + "\(skippedRedundant) redundant, \(skippedBusy) busy; "
+              + "\(skippedRedundant) redundant, \(skippedBusy) busy, "
+              + "\(skippedExposure) exposure settling; "
               + "\(replaced) replaced by sharper; "
               + "max thermal state \(maxThermalState))")
 
@@ -390,6 +413,9 @@ class CaptureManager {
             "skipped_blurred": skippedBlurred,
             "skipped_redundant": skippedRedundant,
             "skipped_busy": skippedBusy,
+            "skipped_exposure_settling": skippedExposure,
+            "exposure_control": exposureControlUsed,
+            "tone_mapping": toneMappingUsed,
             "replaced_sharper": replaced,
             "thermal_state_max": maxThermalState,
             "guided": true,
@@ -444,6 +470,7 @@ class CaptureManager {
             finder = nil
         }
         ArkitSessionHost.shared.onFrame = nil
+        FastExposure.shared.stop()
         guidance?.shutdown()
         guidance = nil
     }
@@ -512,6 +539,9 @@ class CaptureManager {
             id = "v\(vistaCount)"
         }
         framesPaused = true
+        // The vista pass meters on a tapped point and brackets with its own
+        // custom exposure; ours must not fight it.
+        FastExposure.shared.stop()
         ArkitSessionHost.shared.beginMetering()
         let dir = tempDir.appendingPathComponent("vistas").appendingPathComponent(id)
         vista = WindowShotSession(into: dir, vistaId: id, role: role)
@@ -544,6 +574,7 @@ class CaptureManager {
         info["opening_ids"] = openingIds
         if groups > 0 { vistas.append(info) }
         ArkitSessionHost.shared.beginMetering()
+        if isRecording { FastExposure.shared.start() }
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.autoSettleSeconds) { self.framesPaused = false }
         return groups
     }
@@ -602,6 +633,16 @@ class CaptureManager {
 
         let sinceKept = frame.timestamp - lastCaptureTime
         if sinceKept < interval {
+            registerAngleCoverage(transform: pose)
+            return
+        }
+
+        // Exposure gate: a frame taken while the exposure is still moving to
+        // the new light is blown out or murky (34 of 93 blown room frames on
+        // the 2026-10-07 window scan). The fast exposure settles in a few
+        // camera frames, so the next keepable frame is a moment away.
+        if FastExposure.shared.isSettling(at: frame.timestamp) {
+            skippedExposure += 1
             registerAngleCoverage(transform: pose)
             return
         }
@@ -686,6 +727,9 @@ class CaptureManager {
         let exposureOffset = frame.camera.exposureOffset
         // Read now, while the frame is current: auto exposure keeps moving.
         let camera = ArkitSessionHost.shared.readCameraSettings()
+        let fe = FastExposure.shared
+        let exposureInfo = ExposureInfo(control: fe.lastControl, errorEV: fe.lastErrorEV,
+                                        clip: fe.lastClip, toneMapping: fe.toneMapping)
         let light = frame.lightEstimate
         let lightIntensity = light.map { Double($0.ambientIntensity) }
         let lightTemperature = light.map { Double($0.ambientColorTemperature) }
@@ -700,6 +744,7 @@ class CaptureManager {
                             imageResolution: imageResolution, pose: pose,
                             timestamp: timestamp, exposureDuration: exposureDuration,
                             exposureOffset: exposureOffset, camera: camera,
+                            exposureInfo: exposureInfo,
                             lightIntensity: lightIntensity, lightTemperature: lightTemperature,
                             thermalState: thermal,
                             coverage: coverageNow, inBand: inBand, segment: segmentNow,
@@ -748,6 +793,7 @@ class CaptureManager {
                             imageResolution: CGSize, pose: simd_float4x4,
                             timestamp: TimeInterval, exposureDuration: Double,
                             exposureOffset: Float, camera: ArkitSessionHost.CameraSettings?,
+                            exposureInfo: ExposureInfo,
                             lightIntensity: Double?, lightTemperature: Double?,
                             thermalState: Int, coverage: Double,
                             inBand: Bool, segment: Int, objectId: String?) {
@@ -870,6 +916,7 @@ class CaptureManager {
             exposureDuration: exposureDuration,
             exposureOffset: exposureOffset,
             camera: camera,
+            exposureInfo: exposureInfo,
             lightIntensity: lightIntensity,
             lightTemperature: lightTemperature,
             thermalState: thermalState,
@@ -1017,61 +1064,13 @@ class CaptureManager {
         return out
     }
 
-    // MARK: - Depth / Confidence saving
+    // MARK: - Depth / Confidence saving (DepthFiles.swift)
 
     private func saveDepth16(_ pixelBuffer: CVPixelBuffer, to path: String) {
-        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
-
-        let width = CVPixelBufferGetWidth(pixelBuffer)
-        let height = CVPixelBufferGetHeight(pixelBuffer)
-        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
-
-        guard let baseAddr = CVPixelBufferGetBaseAddress(pixelBuffer)?
-            .assumingMemoryBound(to: Float32.self) else { return }
-
-        var pixels = [UInt16]()
-        pixels.reserveCapacity(width * height)
-
-        for y in 0..<height {
-            let row = baseAddr.advanced(by: y * bytesPerRow / MemoryLayout<Float32>.stride)
-            for x in 0..<width {
-                let depthMeters = row[x]
-                // Round, not truncate (truncation biased every depth 0.5 mm short).
-                // A non-finite or negative reading would trap UInt16(); 0 = no depth.
-                let mm = depthMeters * 1000
-                let depthMM: UInt16 = (mm.isFinite && mm > 0)
-                    ? UInt16(min(mm.rounded(), Float(UInt16.max))) : 0
-                pixels.append(depthMM)
-            }
-        }
-
-        let data = pixels.withUnsafeBytes { Data($0) }
-        try? data.write(to: URL(fileURLWithPath: path))
+        DepthFiles.saveDepth16(pixelBuffer, to: path)
     }
 
     private func saveConfidence(_ pixelBuffer: CVPixelBuffer, to path: String) {
-        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
-
-        let width = CVPixelBufferGetWidth(pixelBuffer)
-        let height = CVPixelBufferGetHeight(pixelBuffer)
-        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
-
-        guard let baseAddr = CVPixelBufferGetBaseAddress(pixelBuffer)?
-            .assumingMemoryBound(to: UInt8.self) else { return }
-
-        var pixels = [UInt8]()
-        pixels.reserveCapacity(width * height)
-
-        for y in 0..<height {
-            let row = baseAddr.advanced(by: y * bytesPerRow)
-            for x in 0..<width {
-                pixels.append(row[x])  // ARKit confidence: 0=low, 1=med, 2=high
-            }
-        }
-
-        let data = Data(pixels)
-        try? data.write(to: URL(fileURLWithPath: path))
+        DepthFiles.saveConfidence(pixelBuffer, to: path)
     }
 }
