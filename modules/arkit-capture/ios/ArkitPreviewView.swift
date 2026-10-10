@@ -479,7 +479,7 @@ class ArkitPreviewView: ExpoView, ARSCNViewDelegate {
 
     /// Main thread. nil/invalid JSON just removes the dome.
     private func rebuildDome(json: String?) {
-        guard let root = sceneView.scene?.rootNode else { return }
+        let root = sceneView.scene.rootNode
         root.childNode(withName: domeNodeName, recursively: false)?.removeFromParentNode()
         guard let json = json, let data = json.data(using: .utf8),
               let spec = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
