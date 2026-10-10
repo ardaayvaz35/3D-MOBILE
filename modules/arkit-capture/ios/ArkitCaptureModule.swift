@@ -145,6 +145,18 @@ public class ArkitCaptureModule: Module {
       self.captureManager?.setObjectBoxes(arr)
     }
 
+    // Finished pieces: boxes (same JSON as setObjectBoxes) whose mesh turns green.
+    Function("setDoneObjectBoxes") { (json: String) -> Void in
+      guard let data = json.data(using: .utf8),
+            let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
+      ArkitSessionHost.shared.setDoneBoxes(arr.compactMap { DoneBox(json: $0) })
+    }
+
+    // Dome shell around the current piece (ArkitPreviewView.rebuildDome); "" removes it.
+    Function("setDome") { (json: String) -> Void in
+      ArkitSessionHost.shared.setDome(json.isEmpty ? nil : json)
+    }
+
     AsyncFunction("classifiedPoints") { (promise: Promise) in
       DispatchQueue.global(qos: .utility).async {
         promise.resolve(ArkitSessionHost.shared.classifiedPoints().map { Double($0) })

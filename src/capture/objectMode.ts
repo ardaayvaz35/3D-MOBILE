@@ -246,6 +246,65 @@ export function makeDome(o: RoomPlanObject, eyeY: number, walls: RoomPlanWall[],
   return out;
 }
 
+/** Shell margin around the footprint's circumscribed ellipse, and above the piece's top. */
+export const DOME_PAD_M = 0.10;
+export const DOME_TOP_PAD_M = 0.05;
+/** Superellipse exponent of the shell's side profile (2 = ellipsoid; higher = flatter top). */
+export const DOME_PROFILE = 4;
+
+export type DomeShell = {
+  center: Vec3;
+  /** Radians, same convention as boxCorners: box x axis -> (cos, 0, -sin). */
+  yaw: number;
+  floorY: number;
+  /** Base ellipse semi-axes along the piece's x and z axes. */
+  semiAxes: [number, number];
+  topY: number;
+  /** Side profile r^p + y^p = 1 (DOME_PROFILE). */
+  profile: number;
+  /** Ring 0 is the lowest band (makeDome: ring 0 = farthest level = lowest elevation). */
+  slices: { ring: number; azimuth: number; state: 'empty' | 'filled' | 'unreachable' }[];
+  rings: number;
+  azimuths: number;
+};
+
+/**
+ * The dome as the AR view draws it (ArkitPreviewView.rebuildDome, which stays
+ * dumb). Azimuth is world degrees like makeDome (h = (sin az, 0, -cos az));
+ * azimuths makeDome dropped (wall side) are absent, so they stay open.
+ */
+export function domeShell(o: RoomPlanObject, dome: Slice[], floorY?: number | null): DomeShell {
+  const base = floorY ?? o.center[1] - o.size[1] / 2;
+  const topY = o.center[1] + o.size[1] / 2 + DOME_TOP_PAD_M;
+  let a = (o.size[0] / 2) * Math.SQRT2 + DOME_PAD_M;
+  let b = (o.size[2] / 2) * Math.SQRT2 + DOME_PAD_M;
+  // The apex stays at the piece's top, so the base widens until the top
+  // corners are inside the shell: r^p + t^p <= 1 at the corner.
+  const p = DOME_PROFILE;
+  const t = Math.min(0.99, (topY - DOME_TOP_PAD_M - base) / Math.max(1e-3, topY - base));
+  const r = Math.hypot(o.size[0] / 2 / a, o.size[2] / 2 / b);
+  const rMax = (1 - t ** p) ** (1 / p);
+  if (r > rMax) {
+    a *= r / rMax;
+    b *= r / rMax;
+  }
+  return {
+    center: o.center,
+    yaw: o.yaw_deg * RAD,
+    floorY: base,
+    semiAxes: [a, b],
+    topY,
+    profile: p,
+    slices: dome.map((s) => ({
+      ring: s.ring,
+      azimuth: s.azimuth,
+      state: s.filled ? 'filled' : s.reachable ? 'empty' : 'unreachable',
+    })),
+    rings: LEVEL_DISTANCES.length,
+    azimuths: AZIMUTHS,
+  };
+}
+
 /** Farthest a filling frame may be, in close distances. */
 export const MAX_DIST_MUL = 1.35;
 

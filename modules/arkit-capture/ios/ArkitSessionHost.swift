@@ -19,6 +19,47 @@ final class ArkitSessionHost: NSObject, ARSessionDelegate {
     /// CoverageMap keeps running underneath to pick the arrow's targets.
     static let paintCoverage = false
     var paintsCoverage: Bool { coverageActive && Self.paintCoverage }
+    /// Finished object-mode pieces: their mesh is painted green (even though
+    /// coverage painting is off). Written from the JS thread, read by overlay builds.
+    private let objectLock = NSLock()
+    private var doneBoxList: [DoneBox] = []
+    private var doneBoxVersion = 0
+    private var domeText: String?
+    private var domeVersionCount = 0
+
+    var doneBoxes: [DoneBox] {
+        objectLock.lock()
+        defer { objectLock.unlock() }
+        return doneBoxList
+    }
+    var doneVersion: Int {
+        objectLock.lock()
+        defer { objectLock.unlock() }
+        return doneBoxVersion
+    }
+    func setDoneBoxes(_ boxes: [DoneBox]) {
+        objectLock.lock()
+        doneBoxList = boxes
+        doneBoxVersion += 1
+        objectLock.unlock()
+    }
+    /// The mesh is drawn as a coloured layer: coverage colours, or just the green pieces.
+    var paintsColorMesh: Bool { coverageActive && (Self.paintCoverage || !doneBoxes.isEmpty) }
+
+    /// Dome shell JSON for the preview (nil = none); the version changes on every change.
+    var dome: (json: String?, version: Int) {
+        objectLock.lock()
+        defer { objectLock.unlock() }
+        return (domeText, domeVersionCount)
+    }
+    func setDome(_ json: String?) {
+        objectLock.lock()
+        if json != domeText {
+            domeText = json
+            domeVersionCount += 1
+        }
+        objectLock.unlock()
+    }
     var onFrame: ((ARFrame) -> Void)?
     var onTrackingStateChange: ((ARCamera.TrackingState) -> Void)?
     private(set) var isRunning = false
@@ -112,6 +153,9 @@ final class ArkitSessionHost: NSObject, ARSessionDelegate {
         if Thread.isMainThread { apply() } else { DispatchQueue.main.sync(execute: apply) }
     }
 
+    /// Called on main after `rerunConfiguration` re-ran the session.
+    var onRerun: (() -> Void)?
+
     /// Re-applies our LiDAR configuration without reset options, so tracking
     /// and the world origin carry on (used when RoomPlan is switched off; see
     /// ObjectFinder).
@@ -169,7 +213,12 @@ final class ArkitSessionHost: NSObject, ARSessionDelegate {
     }
 
     func rerunConfiguration() {
-        let apply = { if self.isRunning { self.session.run(self.makeConfiguration()) } }
+        let apply = {
+            if self.isRunning {
+                self.session.run(self.makeConfiguration())
+                self.onRerun?()
+            }
+        }
         if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
     }
 

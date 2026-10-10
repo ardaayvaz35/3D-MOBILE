@@ -103,6 +103,19 @@ final class FastExposure {
         if d.isExposureModeSupported(.continuousAutoExposure) { d.exposureMode = .continuousAutoExposure }
     }
 
+    /// Object mode: someone else freezes the exposure. Stop driving it and give
+    /// the camera back to continuous auto (so the lock grabs a settled value),
+    /// but keep the global tone curve on: one curve for the whole scan.
+    func pauseControl() {
+        guard active else { return }
+        active = false
+        lastControl = "auto"
+        guard let d = device else { return }
+        do { try d.lockForConfiguration() } catch { return }
+        defer { d.unlockForConfiguration() }
+        if d.isExposureModeSupported(.continuousAutoExposure) { d.exposureMode = .continuousAutoExposure }
+    }
+
     /// Every camera frame (main thread, ARSession delegate).
     func process(_ frame: ARFrame) {
         guard active, let d = device else { return }

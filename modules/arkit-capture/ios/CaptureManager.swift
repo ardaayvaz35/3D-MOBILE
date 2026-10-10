@@ -71,6 +71,9 @@ class CaptureManager {
         let segment: Int
         /// Object whose walk-around this frame belongs to; nil = room frame.
         let objectId: String?
+        /// True when exposure and white balance were locked for this frame
+        /// (object mode); false = continuous auto.
+        let exposureLocked: Bool
     }
 
     struct ExportResult {
@@ -233,6 +236,16 @@ class CaptureManager {
     // Main thread.
     private var captureMode = "room"
     private var objectId: String?
+    /// Exposure and white balance are locked while in object mode (one piece's
+    /// frames then share one exposure; auto varied up to 4.5x while walking
+    /// around a dresser). `exposureLocked` = the lock fully took;
+    /// `exposureLockTried` = we touched the device, so leaving must restore auto.
+    /// `exposureEpoch` invalidates delayed lock / settle blocks after a mode flip.
+    private var exposureLocked = false
+    private var exposureLockTried = false
+    private var exposureEpoch = 0
+    /// CACurrentMediaTime of the last return to auto metering (lock or vista).
+    private var lastMeteringAt: CFTimeInterval = 0
     /// Boxes the user scanned, ARKit world, as objects.json wants them.
     private var objectBoxes: [[String: Any]] = []
     /// metadata.json `house` block (spec 2026-10-05 §4.2), set by JS while recording.
@@ -250,13 +263,105 @@ class CaptureManager {
         self.onObjects = onObjects
     }
 
+    /// Clears lock state and cancels delayed blocks. Hops to the main thread,
+    /// where every other reader and writer of this state lives.
+    private func resetExposureLock(arm: Bool, wait: Bool) {
+        let reset = {
+            self.exposureEpoch += 1
+            self.exposureLocked = false
+            self.exposureLockTried = false
+            // Set with the reset at start, cleared at stop: always on main.
+            if arm {
+                ArkitSessionHost.shared.onRerun = { [weak self] in self?.exposureMayHaveReset() }
+            } else {
+                ArkitSessionHost.shared.onRerun = nil
+            }
+        }
+        if Thread.isMainThread { reset() }
+        else if wait { DispatchQueue.main.sync(execute: reset) }
+        else { DispatchQueue.main.async(execute: reset) }
+    }
+
+    /// ARKit re-ran its configuration mid-recording (RoomPlan gave the session
+    /// back). Whether that drops the camera's locked exposure is not known, so
+    /// the lock is re-applied while one is meant to be held.
+    private func exposureMayHaveReset() {
+        guard isRecording, exposureLockTried, captureMode != "room", vista == nil else { return }
+        // Until the lock is back, frames are neither kept nor tagged as locked.
+        // (The re-lock freezes the current auto values; re-applying the first
+        // lock's exact values would need custom-exposure calls in the host.)
+        exposureLocked = false
+        framesPaused = true
+        let epoch = exposureEpoch
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self = self, self.isRecording, self.exposureEpoch == epoch,
+                  self.exposureLockTried, self.captureMode != "room", self.vista == nil else { return }
+            self.exposureLocked = ArkitSessionHost.shared.lockExposureAndWhiteBalance()
+            self.framesPaused = false
+        }
+    }
+
+    /// Main thread. Waits for auto exposure to settle, then freezes it, so the
+    /// lock never grabs a frame full of one wall colour.
+    private func beginExposureLock() {
+        guard !exposureLockTried else { return }  // already locked (paused -> object)
+        exposureEpoch += 1
+        let epoch = exposureEpoch
+        // Frames wait for the lock so every object frame is locked. Whoever
+        // bumps the epoch (end of lock, vista, stop) owns clearing this pause.
+        framesPaused = true
+        // At least 0.5 s, and never before auto has had its settle time since
+        // the last return to auto metering.
+        let sinceMetering = CACurrentMediaTime() - lastMeteringAt
+        let delay = max(0.5, Self.autoSettleSeconds - sinceMetering)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self = self, self.isRecording, self.exposureEpoch == epoch,
+                  self.captureMode == "object", self.vista == nil else { return }
+            self.exposureLockTried = true
+            self.exposureLocked = ArkitSessionHost.shared.lockExposureAndWhiteBalance()
+            self.framesPaused = false
+        }
+    }
+
+    /// Main thread. Back to continuous centre-metered auto, frames not kept
+    /// while it re-settles (same gate as after a vista pass).
+    private func endExposureLock() {
+        exposureEpoch += 1
+        let epoch = exposureEpoch
+        if exposureLockTried {
+            exposureLockTried = false
+            exposureLocked = false
+            ArkitSessionHost.shared.beginMetering()
+            lastMeteringAt = CACurrentMediaTime()
+        }
+        // Also when the lock never happened: a pending lock block paused frames.
+        framesPaused = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.autoSettleSeconds) { [weak self] in
+            guard let self = self, self.exposureEpoch == epoch, self.vista == nil else { return }
+            self.framesPaused = false
+        }
+    }
+
     /// "room" | "object" | "paused" (black transition screen: the session
     /// keeps tracking, frames are not kept).
     func setCaptureMode(_ mode: String, objectId: String?) {
         let apply = {
+            let was = self.captureMode
             self.captureMode = mode
             self.objectId = mode == "object" ? objectId : nil
             self.guidance?.heightFree = mode != "room"
+            if self.isRecording && mode != was {
+                if mode == "object" {
+                    // The object lock freezes the exposure; the fast exposure steps aside
+                    // (tone mapping stays, one curve for the whole scan).
+                    FastExposure.shared.pauseControl()
+                    self.beginExposureLock()
+                } else if mode == "room" {
+                    self.endExposureLock()
+                    if self.vista == nil { FastExposure.shared.start() }
+                }
+                // "paused" keeps the lock until room mode resumes.
+            }
         }
         if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
     }
@@ -319,6 +424,8 @@ class CaptureManager {
         vistaCount = 0
         controlCount = 0
         framesPaused = false
+        // Async: this runs on the JS thread; blocking on main could deadlock.
+        resetExposureLock(arm: true, wait: false)
         currentSegment = 0
         openingsHint = nil
         ArkitSessionHost.shared.coverage.reset()
@@ -353,6 +460,7 @@ class CaptureManager {
         let replaced = replacedSharper
         let inBandCount = framesInBand
         stateLock.unlock()
+        resetExposureLock(arm: false, wait: true)
         ArkitSessionHost.shared.unlockExposureAndWhiteBalance()
         ArkitSessionHost.shared.coverageActive = false
         let finderFacts: [String: Any]
@@ -538,11 +646,21 @@ class CaptureManager {
             vistaCount += 1
             id = "v\(vistaCount)"
         }
-        framesPaused = true
-        // The vista pass meters on a tapped point and brackets with its own
-        // custom exposure; ours must not fight it.
-        FastExposure.shared.stop()
-        ArkitSessionHost.shared.beginMetering()
+        // The vista brackets take the camera off our lock: stop tagging frames
+        // as locked and cancel a pending lock (endVista re-arms it). The vista
+        // pass meters on a tapped point and brackets with its own custom
+        // exposure; the fast exposure must not fight it.
+        // Sync Function on the JS thread: state that main-thread blocks and
+        // frame handling read changes on main (the id and `vista` below stay
+        // synchronous, JS needs the id now).
+        DispatchQueue.main.async {
+            self.framesPaused = true
+            self.exposureEpoch += 1
+            self.exposureLocked = false
+            self.exposureLockTried = false
+            FastExposure.shared.stop()
+            ArkitSessionHost.shared.beginMetering()
+        }
         let dir = tempDir.appendingPathComponent("vistas").appendingPathComponent(id)
         vista = WindowShotSession(into: dir, vistaId: id, role: role)
         vistaInfo = ["id": id, "role": role, "path": "vistas/\(id)/shots.json", "segment": currentSegment]
@@ -574,8 +692,23 @@ class CaptureManager {
         info["opening_ids"] = openingIds
         if groups > 0 { vistas.append(info) }
         ArkitSessionHost.shared.beginMetering()
-        if isRecording { FastExposure.shared.start() }
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.autoSettleSeconds) { self.framesPaused = false }
+        DispatchQueue.main.async {
+            guard self.isRecording else { return }
+            self.lastMeteringAt = CACurrentMediaTime()
+            if self.captureMode == "object" {
+                // Object mode keeps its fixed lock, not the fast exposure.
+                // The lock block owns clearing the pause (and its delay covers settling).
+                self.beginExposureLock()
+                return
+            }
+            FastExposure.shared.start()
+            self.exposureEpoch += 1
+            let epoch = self.exposureEpoch
+            DispatchQueue.main.asyncAfter(deadline: .now() + CaptureManager.autoSettleSeconds) {
+                guard self.exposureEpoch == epoch, self.vista == nil else { return }
+                self.framesPaused = false
+            }
+        }
         return groups
     }
 
@@ -736,6 +869,7 @@ class CaptureManager {
 
         let segmentNow = currentSegment
         let objectNow = captureMode == "object" ? objectId : nil
+        let lockedNow = exposureLocked && captureMode == "object"
         workQueue.async { [weak self] in
             guard let self = self else { return }
             defer { self.endWork() }
@@ -748,7 +882,7 @@ class CaptureManager {
                             lightIntensity: lightIntensity, lightTemperature: lightTemperature,
                             thermalState: thermal,
                             coverage: coverageNow, inBand: inBand, segment: segmentNow,
-                            objectId: objectNow)
+                            objectId: objectNow, exposureLocked: lockedNow)
         }
     }
 
@@ -796,7 +930,8 @@ class CaptureManager {
                             exposureInfo: ExposureInfo,
                             lightIntensity: Double?, lightTemperature: Double?,
                             thermalState: Int, coverage: Double,
-                            inBand: Bool, segment: Int, objectId: String?) {
+                            inBand: Bool, segment: Int, objectId: String?,
+                            exposureLocked: Bool) {
         let started = CACurrentMediaTime()
         let rgbImage = CIImage(cvPixelBuffer: pixelBuffer)
 
@@ -923,7 +1058,8 @@ class CaptureManager {
             processMs: processMs,
             bytes: bytesWritten,
             segment: segment,
-            objectId: objectId
+            objectId: objectId,
+            exposureLocked: exposureLocked
         ))
         let countNow = frameCount
         let bytesNow = imageBytesUsed
