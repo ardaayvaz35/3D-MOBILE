@@ -163,9 +163,17 @@ export default function LidarScanScreen({ navigation, route }: Props) {
       setDoneDismissed(false);
       v.reset();
       om.reset();
-      startLidarRecording();
-      // After start: setHouseInfo needs the running CaptureManager.
-      if (inHouse) hc.recordingStarted();
+      try {
+        console.log('[DEBUG-start] startLidarRecording');
+        startLidarRecording();
+        // After start: setHouseInfo needs the running CaptureManager.
+        if (inHouse) hc.recordingStarted();
+      } catch (err: any) {
+        // A start that throws used to leave the button looking dead.
+        console.log('[DEBUG-start] failed', err?.message ?? String(err));
+        Alert.alert('Tarama başlatılamadı', err?.message ?? String(err));
+        return;
+      }
       setRecording(true);
       return;
     }
